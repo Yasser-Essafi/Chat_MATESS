@@ -1,0 +1,385 @@
+/* ══════════════════════════════════════════════════════════════
+   STATOUR Modern Chat UI — Custom CSS
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Global ──────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+    --primary: #1B4F72;
+    --primary-light: #2980B9;
+    --primary-dark: #154360;
+    --accent: #C0392B;
+    --success: #27AE60;
+    --warning: #F39C12;
+    --bg-dark: #0E1117;
+    --bg-card: #1A1D23;
+    --bg-hover: #252830;
+    --text-primary: #FAFAFA;
+    --text-secondary: #A0A4B0;
+    --border: #2D3139;
+    --sidebar-bg: #14171C;
+    --chat-user: #1B4F72;
+    --chat-assistant: #1E2228;
+    --shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Hide Streamlit defaults ─────────────────────────────────── */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+
+.stDeployButton {display: none;}
+
+div[data-testid="stToolbar"] {display: none;}
+
+/* ── Sidebar ─────────────────────────────────────────────────── */
+section[data-testid="stSidebar"] {
+    background-color: var(--sidebar-bg) !important;
+    border-right: 1px solid var(--border);
+    width: 320px !important;
+}
+
+section[data-testid="stSidebar"] .block-container {
+    padding-top: 1rem;
+}
+
+/* ── Sidebar conversation items ──────────────────────────────── */
+.conversation-item {
+    padding: 10px 14px;
+    margin: 4px 0;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 1px solid transparent;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.conversation-item:hover {
+    background-color: var(--bg-hover);
+    border-color: var(--border);
+}
+
+.conversation-item.active {
+    background-color: var(--primary-dark);
+    border-color: var(--primary);
+}
+
+.conversation-item .conv-title {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.conversation-item .conv-date {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+.conversation-item .conv-agent {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-dark);
+}
+
+/* ── New chat button ─────────────────────────────────────────── */
+.new-chat-btn {
+    width: 100%;
+    padding: 12px;
+    background: linear-gradient(135deg, var(--primary), var(--primary-light));
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.new-chat-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(27, 79, 114, 0.4);
+}
+
+/* ── Chat area ───────────────────────────────────────────────── */
+.chat-container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 1rem;
+}
+
+/* ── Message bubbles ─────────────────────────────────────────── */
+.message-wrapper {
+    display: flex;
+    margin-bottom: 20px;
+    animation: fadeIn 0.3s ease;
+}
+
+.message-wrapper.user {
+    justify-content: flex-end;
+}
+
+.message-wrapper.assistant {
+    justify-content: flex-start;
+}
+
+.message-bubble {
+    max-width: 80%;
+    padding: 14px 18px;
+    border-radius: 16px;
+    line-height: 1.6;
+    font-size: 0.9rem;
+    position: relative;
+}
+
+.message-bubble.user {
+    background: linear-gradient(135deg, var(--chat-user), var(--primary-light));
+    color: white;
+    border-bottom-right-radius: 4px;
+}
+
+.message-bubble.assistant {
+    background: var(--chat-assistant);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+}
+
+/* ── Agent badge ─────────────────────────────────────────────── */
+.agent-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.agent-badge.normal {
+    background: rgba(52, 152, 219, 0.15);
+    color: #3498DB;
+}
+
+.agent-badge.researcher {
+    background: rgba(46, 204, 113, 0.15);
+    color: #2ECC71;
+}
+
+.agent-badge.analytics {
+    background: rgba(243, 156, 18, 0.15);
+    color: #F39C12;
+}
+
+/* ── Timing info ─────────────────────────────────────────────── */
+.timing-info {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-top: 6px;
+    text-align: right;
+}
+
+/* ── Chart container ─────────────────────────────────────────── */
+.chart-container {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin: 12px 0;
+    background: var(--bg-card);
+}
+
+.chart-container iframe {
+    width: 100%;
+    border: none;
+    min-height: 450px;
+}
+
+/* ── Input area ──────────────────────────────────────────────── */
+.input-container {
+    position: fixed;
+    bottom: 0;
+    left: 320px;
+    right: 0;
+    padding: 16px 24px;
+    background: linear-gradient(180deg, transparent, var(--bg-dark) 30%);
+    z-index: 100;
+}
+
+.stTextInput > div > div > input {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 12px !important;
+    color: var(--text-primary) !important;
+    padding: 14px 18px !important;
+    font-size: 0.95rem !important;
+    transition: border-color 0.2s ease !important;
+}
+
+.stTextInput > div > div > input:focus {
+    border-color: var(--primary-light) !important;
+    box-shadow: 0 0 0 2px rgba(41, 128, 185, 0.2) !important;
+}
+
+.stTextInput > div > div > input::placeholder {
+    color: var(--text-secondary) !important;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+.header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+    border-radius: 0 0 12px 12px;
+}
+
+.header-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.header-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+/* ── Welcome screen ──────────────────────────────────────────── */
+.welcome-container {
+    text-align: center;
+    padding: 60px 20px;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.welcome-title {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+}
+
+.welcome-subtitle {
+    font-size: 1rem;
+    color: var(--text-secondary);
+    margin-bottom: 40px;
+    line-height: 1.6;
+}
+
+.suggestion-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 24px;
+}
+
+.suggestion-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+}
+
+.suggestion-card:hover {
+    border-color: var(--primary-light);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+}
+
+.suggestion-card .icon {
+    font-size: 1.5rem;
+    margin-bottom: 8px;
+}
+
+.suggestion-card .title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.suggestion-card .desc {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────── */
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-secondary);
+}
+
+/* ── Animation ───────────────────────────────────────────────── */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.typing-indicator {
+    display: flex;
+    gap: 4px;
+    padding: 12px 16px;
+}
+
+.typing-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    animation: pulse 1.4s infinite;
+}
+
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    section[data-testid="stSidebar"] {
+        width: 260px !important;
+    }
+    .input-container {
+        left: 0;
+    }
+    .suggestion-grid {
+        grid-template-columns: 1fr;
+    }
+}

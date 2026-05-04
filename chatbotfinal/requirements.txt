@@ -1,0 +1,44 @@
+# Core LLM
+openai
+langchain
+langchain-openai
+langchain-community
+langgraph
+
+# MCP Protocol
+mcp
+
+# Vector Store (RAG)
+chromadb
+langchain-chroma
+
+# Web Search
+tavily-python
+
+# Database
+psycopg2-binary
+sqlalchemy
+
+# Microsoft Fabric Lakehouse Gold connectivity
+# pyodbc requires "ODBC Driver 17/18 for SQL Server" installed system-wide.
+# Windows: https://aka.ms/odbc18
+# Linux:   https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/install
+pyodbc
+azure-identity
+
+# Data Analytics
+pandas
+numpy
+plotly
+matplotlib
+scikit-learn
+openpyxl
+
+# Environment
+python-dotenv
+
+# Frontend
+streamlit
+
+# Utilities
+tiktoken

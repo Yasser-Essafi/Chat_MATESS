@@ -1,0 +1,46 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# ── Secrets — NEVER commit ────────────────────────────────────
+.env
+chatbotfinal/.env
+
+# ── Runtime outputs (auto-generated) ─────────────────────────
+chatbotfinal/charts/
+chatbotfinal/logs/
+chatbotfinal/chat_history/
+
+# ── Binary / ChromaDB vector store ───────────────────────────
+chatbotfinal/knowledge_base/vectorstore/
+
+# ── Legacy Excel data (replaced by Fabric Lakehouse Gold) ────
+chatbotfinal/data/
+
+# ── Log & temp server files ───────────────────────────────────
+*.log
+server_err.txt
+server_log.txt
+server_out.log
+chatbotfinal/server_live.log
+chatbotfinal/server_err.txt
+chatbotfinal/server_log.txt
+chatbotfinal/server_test.log
+
+# ── Old nested git (renamed to avoid submodule) ──────────────
+chatbotfinal/.git_old/
+
+# ── Claude Code internal config ───────────────────────────────
+.claude/
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

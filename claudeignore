@@ -1,0 +1,29 @@
+# Claude Code ignore — reduces context noise from runtime/binary files
+
+# Runtime outputs (large, auto-generated)
+chatbotfinal/charts/
+chatbotfinal/logs/
+chatbotfinal/chat_history/
+
+# Binary / vector store (unreadable)
+chatbotfinal/knowledge_base/vectorstore/
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Git internals
+.git/
+
+# Data files (large Excel — Claude doesn't need to read them directly)
+chatbotfinal/data/
+
+# Server log dumps
+chatbotfinal/server_live.log
+chatbotfinal/server_err.txt
+chatbotfinal/server_log.txt
+chatbotfinal/server_test.log
+
+# Assets (binary images)
+chatbotfinal/ui/assets/
