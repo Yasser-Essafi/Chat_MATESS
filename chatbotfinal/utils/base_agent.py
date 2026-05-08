@@ -58,6 +58,8 @@ from config.settings import (
     MAX_HISTORY_MESSAGES,
     MAX_HISTORY_CHARS,
     MODEL_IS_REASONING,
+    CONTEXT_RECENT_EXCHANGES,
+    CONTEXT_SUMMARY_MAX_TOKENS,
 )
 from utils.logger import get_logger
 
@@ -129,12 +131,13 @@ def get_shared_client() -> AzureOpenAI:
 
 def reset_shared_client() -> None:
     """Reset the shared client (useful for testing or credential rotation)."""
-    global _shared_client, _model_rejects_temperature, _model_rejects_system_role
+    global _shared_client, _model_rejects_temperature, _model_rejects_system_role, _model_rejects_reasoning_effort
     with _client_lock:
         _shared_client = None
     with _model_detection_lock:
         _model_rejects_temperature = None
         _model_rejects_system_role = None
+        _model_rejects_reasoning_effort = None
     logger.info("Shared AzureOpenAI client reset")
 
 
@@ -510,7 +513,7 @@ class BaseAgent:
 
     # Keep this many recent messages verbatim — gives full fidelity for
     # immediate follow-ups. Everything older is compressed into a summary.
-    _VERBATIM_KEEP = 6  # = last 3 user+assistant exchanges
+    _VERBATIM_KEEP = max(2, CONTEXT_RECENT_EXCHANGES * 2)
 
     def _compress_old_messages(self, messages: List[Dict[str, str]]) -> str:
         """
@@ -531,18 +534,26 @@ class BaseAgent:
 
         prior = f"\nRésumé précédent: {self._history_summary}" if self._history_summary else ""
         prompt = (
-            f"Résume ces échanges entre un utilisateur et un assistant analytique "
-            f"en 2-3 phrases. Inclus: données consultées, analyses demandées, "
-            f"résultats clés, visualisations générées.{prior}\n\n"
-            f"Échanges:\n{exchanges_text}\n\n"
-            f"Résumé (max 120 mots, en français):"
+            "Tu maintiens une mémoire compacte pour un chatbot analytique STATOUR.\n"
+            "Produit un résumé structuré en français, très dense, qui préserve uniquement "
+            "ce qui aide les prochains follow-ups.\n\n"
+            "Inclure si présent :\n"
+            "- domaine actif (APF frontières, hébergement, recherche, prévision)\n"
+            "- périodes, mois, années, pays/régions/voies/postes demandés\n"
+            "- métriques et définitions utiles (arrivées APF vs arrivées hôtelières)\n"
+            "- résultats chiffrés clés, SQL/logique utilisée, graphiques générés\n"
+            "- préférences ou corrections de l'utilisateur, questions ouvertes\n"
+            "Ne garde pas les salutations, formulations répétées ni détails sans impact.\n"
+            f"{prior}\n\n"
+            f"Échanges à compacter:\n{exchanges_text}\n\n"
+            "Résumé structuré (max 220 mots):"
         )
 
         try:
             response = self.client.chat.completions.create(
                 model=self.deployment,
                 messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=180,
+                max_completion_tokens=CONTEXT_SUMMARY_MAX_TOKENS,
             )
             if response.choices and response.choices[0].message.content:
                 return response.choices[0].message.content.strip()
@@ -592,12 +603,13 @@ class BaseAgent:
         3. Re-inject the summary as a synthetic exchange at the top.
         4. Enforce character budget as a final safety net.
 
-        Result: the model always sees [system] + [summary context] + [last 3 exchanges]
+        Result: the model always sees [system] + [summary context] + the
+        configured recent exchange window.
         regardless of how long the conversation has been.
         """
         import re as _re
 
-        max_with_system = self._max_history_messages + 1
+        max_real_messages = self._max_history_messages
 
         # ── Step 1: Remove existing summary messages from history body ──
         # We rebuild them fresh below so they don't accumulate.
@@ -607,7 +619,7 @@ class BaseAgent:
         ]
 
         # ── Step 2: Compress when above threshold ──
-        if len(real_messages) > max_with_system:
+        if len(real_messages) > max_real_messages:
             to_compress = real_messages[:-self._VERBATIM_KEEP]
             recent      = real_messages[-self._VERBATIM_KEEP:]
 
@@ -945,6 +957,45 @@ class BaseAgent:
         """Append a user+assistant message pair to conversation history."""
         self.conversation_history.append({"role": "user", "content": user_msg})
         self.conversation_history.append({"role": "assistant", "content": assistant_msg})
+
+    def export_context_state(self) -> Dict:
+        """Return a serializable snapshot of this agent's conversation memory."""
+        return {
+            "conversation_history": [
+                msg.copy() for msg in self.conversation_history
+                if msg.get("role") in {"system", "developer", "user", "assistant"}
+            ],
+            "history_summary": self._history_summary,
+        }
+
+    def import_context_state(self, state: Optional[Dict]) -> None:
+        """Load a previously exported conversation memory snapshot."""
+        if not state:
+            self.conversation_history = [
+                {"role": "system", "content": self.system_prompt}
+            ]
+            self._history_summary = ""
+            return
+
+        history = state.get("conversation_history") or []
+        clean_history = []
+        for msg in history:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role in {"system", "developer", "user", "assistant"} and isinstance(content, str):
+                clean_msg = {"role": role, "content": content}
+                if msg.get("_is_summary"):
+                    clean_msg["_is_summary"] = True
+                clean_history.append(clean_msg)
+
+        if not clean_history or clean_history[0]["role"] not in {"system", "developer"}:
+            clean_history.insert(0, {"role": "system", "content": self.system_prompt})
+        else:
+            clean_history[0]["content"] = self.system_prompt
+            clean_history[0]["role"] = "system"
+
+        self.conversation_history = clean_history
+        self._history_summary = state.get("history_summary") or ""
 
     def _pop_last_user_message(self) -> Optional[Dict[str, str]]:
         """Remove and return the last user message (for rollback on failure)."""

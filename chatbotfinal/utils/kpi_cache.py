@@ -181,15 +181,24 @@ class KPICache:
             return int(m.group(1))
         return None
 
-    def try_answer(self, question: str) -> Optional[str]:
+    def try_answer(self, question: str, domain_context: Optional[str] = None) -> Optional[str]:
         """
         Try to answer a question from pre-computed KPIs.
         Returns a formatted response string if matched, or None to route to LLM.
+
+        domain_context: active conversation domain passed by the orchestrator.
+          "hebergement" → skip all APF answers (the session is about hotel data).
+          "apf"         → normal APF fast-path.
+          None          → unknown, fall through to keyword detection below.
 
         Only handles simple, unambiguous KPI queries.
         Complex analysis, charts, and multi-dimensional queries go to LLM.
         """
         if not self._kpis:
+            return None
+
+        # Session is about hébergement — KPI cache only covers APF, so always skip.
+        if domain_context == "hebergement":
             return None
 
         q = question.lower().strip()
@@ -201,7 +210,7 @@ class KPICache:
             return None
 
         # ── Don't intercept comparison or multi-dimensional queries ──
-        complex_words = ["compar", "évolution", "tendance", "trend", "par rapport",
+        complex_words = ["compar", "par rapport",
                          "versus", " vs ", "entre", "top 5", "top 10", "top 20",
                          "croissance", "variation", "pourcentage", "breakdown",
                          "par mois", "mensuel", "par voie", "par région", "par continent",
@@ -235,7 +244,32 @@ class KPICache:
             "télédéclaration", "teledeclaration",
         ]
         if any(kw in q for kw in _HEBERGEMENT_KW):
+            import re as _re
+            _NEEDS_NUMBER_PATTERN = _re.compile(
+                r'\b(combien|nombre|total|chiffre|montant|valeur|quel est|quelle est)\b',
+                _re.IGNORECASE
+            )
+            if _NEEDS_NUMBER_PATTERN.search(q):
+                return None  # Route to analytics for precise hébergement numbers
+            # Context questions about hébergement (no specific number asked)
+            # also route to analytics/normal — KPI cache only covers APF data.
             return None
+
+        # ── AMBIGUÏTÉ "ARRIVÉES" ────────────────────────────────────────
+        # "arrivées" alone can mean APF border crossings or hotel check-ins.
+        # The APF-only cache must not answer this fast-path unless the user
+        # clearly specified APF/frontier context. Let Analytics query both
+        # fact tables and clarify the two metrics.
+        has_arrivees = bool(re.search(r"\barriv[ée]es?\b|\barrivees?\b", q))
+        if has_arrivees:
+            apf_signals = [
+                "apf", "poste frontière", "postes frontières", "frontière",
+                "frontiere", "frontières", "frontieres", "mre", "tes",
+                "voie", "aérien", "aerien", "maritime", "terrestre",
+                "continent", "dgsn",
+            ]
+            if not any(sig in q for sig in apf_signals):
+                return None
 
         # ── Year total query ──
         year_match = re.search(r'\b(20[12]\d)\b', q)
@@ -246,13 +280,35 @@ class KPICache:
                 mre = self._kpis.get("mre_by_year", {}).get(year, 0)
                 tes = self._kpis.get("tes_by_year", {}).get(year, 0)
 
+                # Partial-year guard: if fewer than 12 months available, add disclaimer.
+                monthly_for_year = self._kpis.get("monthly_by_year", {}).get(year, {})
+                available_months = sorted(monthly_for_year.keys())
+                is_partial = bool(available_months) and len(available_months) < 12
+                if is_partial:
+                    last_mo = available_months[-1]
+                    last_mo_name = MONTHS_FR.get(last_mo, str(last_mo))
+                    months_range = f"Janvier–{last_mo_name}" if last_mo > 1 else "Janvier"
+                    partial_note = (
+                        f"\n\n> ⚠️ **Données partielles** : seuls {len(available_months)} mois "
+                        f"disponibles pour {year} ({months_range} {year}). "
+                        f"Ce total ne représente PAS une année complète."
+                    )
+                else:
+                    partial_note = ""
+
                 # Check for MRE/TES specific question
                 # Use word-boundary check so "touristes" does not match "tes"
                 _tes_exact = bool(re.search(r'\btes\b', q))
                 if "mre" in q or "marocain résidant" in q or "diaspora" in q:
-                    return f"En **{year}**, les **MRE** (Marocains Résidant à l'Étranger) représentaient **{mre:,}** arrivées."
+                    return (
+                        f"En **{year}**, les **MRE** (Marocains Résidant à l'Étranger) "
+                        f"représentaient **{mre:,}** arrivées." + partial_note
+                    )
                 if _tes_exact or "touriste étranger" in q or "étranger séjournant" in q:
-                    return f"En **{year}**, les **TES** (Touristes Étrangers Séjournistes) représentaient **{tes:,}** arrivées."
+                    return (
+                        f"En **{year}**, les **TES** (Touristes Étrangers Séjournistes) "
+                        f"représentaient **{tes:,}** arrivées." + partial_note
+                    )
 
                 # Generic total
                 response = f"En **{year}**, le Maroc a enregistré **{total:,}** arrivées aux postes frontières"
@@ -265,7 +321,7 @@ class KPICache:
                     )
                 else:
                     response += "."
-                return response
+                return response + partial_note
 
         # ── Grand total query ──
         grand_total_kws = ["total arrivées", "total des arrivées", "total global",
@@ -323,3 +379,27 @@ class KPICache:
         self._kpis = {}
         self._build(df)
         logger.info("KPI cache refreshed")
+
+    def get_kpi_summary(self) -> str:
+        """
+        Returns a compact KPI context string for injection into analytics prompts.
+        Used to give the LLM quick awareness of available data scope.
+        Max ~200 chars.
+        """
+        if not self._kpis:
+            return ""
+
+        years = self._kpis.get("years_available", [])
+        last_year = self._kpis.get("last_year")
+        last_month = self._kpis.get("last_month_name", "")
+        grand_total = self._kpis.get("grand_total")
+
+        parts = []
+        if years:
+            parts.append(f"Données APF disponibles: {years[0]}–{years[-1]}")
+        if last_year and last_month:
+            parts.append(f"Dernière période: {last_month} {last_year}")
+        if grand_total:
+            parts.append(f"Total global APF: {grand_total:,} arrivées")
+
+        return " | ".join(parts)

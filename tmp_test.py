@@ -151,6 +151,23 @@ TESTS = [
     # ─── Out-of-range years (should reroute to researcher) ──────────────
     ("O1 historical_2010", "tourisme au Maroc en 2010", None,
         [], ["Impossible"], {}),
+
+    # ─── Tests analyse causale — doivent aller au researcher ─────────────────
+    ("X1 causal_hausse", "pourquoi la hausse des arrivées en juillet 2025", "researcher",
+        [], ["Impossible"], {}),
+
+    ("X2 causal_pays", "pourquoi les touristes britanniques ont augmenté en 2024", "researcher",
+        ["2024"], ["Impossible"], {}),
+
+    ("X3 ambiguity_arrivees", "combien d'arrivées en 2024", "analytics",
+        ["arrivées", "2024"], [], {}),
+
+    # ─── Tests prévision — taux de croissance doit être > 5% ──────────────────
+    ("P7 pred_growth_rate_sane", "estimation flux touristique 2027", "prediction",
+        ["2027"], ["0.0%/an", "0.1%/an", "0.2%/an"], {}),
+
+    ("P8 pred_with_factors", "prévision optimiste 2028", "prediction",
+        ["2028", "scénario", "optimiste"], ["0.0%/an"], {}),
 ]
 
 

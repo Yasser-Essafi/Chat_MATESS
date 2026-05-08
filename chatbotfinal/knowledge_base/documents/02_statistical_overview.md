@@ -1,6 +1,6 @@
 # 📊 Vue d'Ensemble Statistique — Arrivées Touristiques au Maroc
 
-> Généré le 2026-04-12 11:00
+> Généré le 2026-05-05 21:34
 
 ## Résumé global
 - **Période couverte** : Janvier 2019 → Février 2026

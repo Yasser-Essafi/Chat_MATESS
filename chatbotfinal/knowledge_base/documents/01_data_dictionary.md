@@ -1,6 +1,6 @@
 # 📖 Dictionnaire de Données — Statistiques APF
 
-> Généré le 2026-04-12 11:00
+> Généré le 2026-05-05 21:34
 
 ## Source
 - **Fichier** : `fact_statistiques_apf.xlsx`
@@ -38,7 +38,7 @@
 - **Voie Aérienne** — Arrivées via aéroports internationaux
 - **Voie Maritime** — Arrivées via ports (ferries depuis Espagne, France, Italie)
 - **Voie Terrestre** — Arrivées via postes frontières terrestres (Ceuta, Melilla)
-- Chaque ligne = agrégat mensuel pour une combinaison (pays de résidence × poste × région × continent × voie)
+- Chaque ligne = agrégat mensuel pour une combinaison (nationalité × poste × région × continent × voie)
 - Granularité temporelle : **mensuelle**
 
 ## Préfixes postes frontières

@@ -127,21 +127,6 @@ _MONTH_PARSE = {
     "décembre": 12, "decembre": 12, "december": 12, "dec": 12,
 }
 
-# Comprehensive multi-query plan — every prediction launches all of these in
-# parallel via search_multi() so the LLM has full context (war, economy, flights,
-# events, currency, neighbouring countries) before estimating.
-_FACTOR_RESEARCH_QUERIES_TEMPLATE = [
-    ("guerre_geopolitique", "guerre conflit géopolitique tourisme {period} maroc afrique nord"),
-    ("conjoncture_economique", "conjoncture économique inflation récession {period} europe maroc tourisme"),
-    ("aerien_connectivite", "trafic aérien compagnies vols routes maroc {period} ryanair royal air maroc"),
-    ("marches_emetteurs", "tourisme france espagne royaume-uni allemagne {period} sortie voyages"),
-    ("evenements_majeurs", "événements maroc {period} can coupe du monde 2030 salons tourisme"),
-    ("change_devises", "taux de change euro dollar dirham {period} pouvoir d'achat tourisme"),
-    ("crise_sanitaire", "crise sanitaire épidémie restrictions voyage {period} maroc"),
-    ("politique_visas", "visa schengen restrictions voyage maroc {period} politique migratoire"),
-]
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # PredictionEngine — pure computation, no I/O
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,8 +173,10 @@ class PredictionEngine:
         """
         external_factors = external_factors or []
 
-        # Last actual data point
-        last_year, last_total = self._last_actual(voie)
+        # Last complete actual data point. APF 2026 is partial in the current
+        # build, so annual projections must use 2025 as the base until 2026
+        # has 12 reported months.
+        last_year, last_total = self._last_actual(voie, complete_only=True)
 
         # Years to project forward
         n_years = target_year - last_year
@@ -309,6 +296,17 @@ class PredictionEngine:
                 )
                 while years and months_per_year.get(years[-1], 0) < 12:
                     years.pop()
+                # Safety: if we removed the latest year, log it clearly
+                if years and df['date_stat_year'].max() not in years:
+                    excluded_year = int(df['date_stat_year'].max())
+                    logger.info(
+                        "CAGR calculation: excluded partial year %d (only %d months available). "
+                        "Using %d→%d window instead.",
+                        excluded_year,
+                        months_per_year.get(excluded_year, 0),
+                        years[0] if years else "?",
+                        years[-1] if years else "?",
+                    )
                 if len(years) < 2:
                     return rates
 
@@ -347,14 +345,24 @@ class PredictionEngine:
 
         return rates
 
-    def _last_actual(self, voie: Optional[str] = None):
-        """Return (last_year, total) from the DataFrame."""
+    def _last_actual(self, voie: Optional[str] = None, complete_only: bool = False):
+        """Return (last_year, total) from the DataFrame.
+
+        complete_only=True excludes the latest partial year, which is critical
+        for APF forecasting because 2026 currently contains only Jan-Feb.
+        """
         if "date_stat_year" not in self.df.columns or "total" not in self.df.columns:
             return (2024, 14_000_000)  # safe fallback
 
         sub = self.df
         if voie and "voie" in self.df.columns:
             sub = self.df[self.df["voie"].str.lower() == voie.lower()]
+
+        if complete_only and "date_stat_month" in sub.columns:
+            months_per_year = sub.groupby("date_stat_year")["date_stat_month"].nunique()
+            complete_years = months_per_year[months_per_year >= 12].index
+            if len(complete_years) > 0:
+                sub = sub[sub["date_stat_year"].isin(complete_years)]
 
         by_year = sub.groupby("date_stat_year")["total"].sum()
         if by_year.empty:
@@ -594,22 +602,16 @@ class PredictionAgent:
                 found.append(num)
         return sorted(found)
 
-    def _gather_factor_research(self, target_year: int) -> Tuple[str, Dict[str, List[Dict]]]:
-        """Fan out the comprehensive factor research in parallel and return:
-            (formatted_context_block, raw_results_by_label)
+    def _dynamic_search(self, queries: List[Tuple[str, str]]) -> Tuple[str, Dict]:
+        """Execute targeted searches from IntentExtractor queries.
 
-        Always called on every prediction request. Returns ("", {}) when no
-        searcher is available rather than failing — the rule-based engine
-        still produces an answer.
+        Replaces the legacy 8-query fan-out with a dynamic plan tailored to
+        the question (period, metric, entities, geo scope). Returns
+        ("", {}) when no searcher / no queries — caller falls back to the
+        rule-based engine alone.
         """
-        if not self._searcher:
+        if not self._searcher or not queries:
             return "", {}
-
-        period = str(target_year)
-        queries = [
-            (label, tpl.format(period=period))
-            for label, tpl in _FACTOR_RESEARCH_QUERIES_TEMPLATE
-        ]
 
         try:
             grouped = self._searcher.search_multi(
@@ -619,27 +621,15 @@ class PredictionAgent:
                 max_workers=4,
             )
         except Exception as e:
-            logger.debug("Multi-factor research failed: %s", e)
+            logger.debug("Dynamic search failed: %s", e)
             return "", {}
 
         if not grouped:
             return "", {}
 
-        # Build a compact, human-readable block grouped by category
-        category_label = {
-            "guerre_geopolitique": "🛡️ Géopolitique & conflits",
-            "conjoncture_economique": "💶 Conjoncture économique",
-            "aerien_connectivite": "✈️ Connectivité aérienne",
-            "marches_emetteurs": "🌍 Marchés émetteurs",
-            "evenements_majeurs": "🎉 Événements majeurs",
-            "change_devises": "💱 Change & devises",
-            "crise_sanitaire": "🏥 Sanitaire",
-            "politique_visas": "🛂 Visas & politique migratoire",
-        }
         sections = []
         for label, items in grouped.items():
-            display = category_label.get(label, label)
-            lines = [f"**{display}**"]
+            lines = [f"**{label}**"]
             for it in items[:2]:
                 title = (it.get("title") or "")[:120]
                 content = (it.get("content") or "")[:200]
@@ -751,11 +741,20 @@ class PredictionAgent:
         else:
             scenario = "baseline"
 
-        # ── ALWAYS run multi-source factor research before predicting ──
+        # ── Dynamic factor research using IntentExtractor ──
         # The rule-based keyword matcher alone misses real-world signals like
-        # current wars, recessions, airline route changes. Every prediction
-        # gets a parallel multi-query Tavily/Brave sweep of 8 categories.
-        web_block, _raw_grouped = self._gather_factor_research(target_year)
+        # current wars, recessions, airline route changes. The IntentExtractor
+        # generates a TARGETED query plan (period + metric + entities + geo)
+        # instead of a fixed 8-query fan-out — fewer wasted queries, better
+        # signal-to-noise on Tavily/Brave.
+        from utils.intent_extractor import IntentExtractor
+        intent_ext = IntentExtractor()
+        intent = intent_ext.extract(user_message)
+        intent.analysis_type = "causal"  # forecasting always needs causal context
+        # Rebuild factor categories now that analysis_type is forced to causal
+        intent.external_factors_categories = intent_ext._build_factor_categories(intent, user_message.lower())
+        targeted_queries = intent_ext.build_search_queries(intent)
+        web_block, _raw_grouped = self._dynamic_search(targeted_queries)
 
         # ── Combine keyword-matched factors with LLM-inferred ones ──
         detected_factors: List[str] = []

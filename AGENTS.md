@@ -217,7 +217,7 @@ user → Flask /api/chat → Orchestrator.route()
 
 ---
 
-## What Claude MUST NOT do — violations from past sessions
+## What Codex MUST NOT do — violations from past sessions
 
 ```
 NEVER re-add streaming — permanently removed. /api/chat/stream must not exist.

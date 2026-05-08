@@ -17,7 +17,7 @@ Usage:
     from utils.db_layer import DBLayer
 
     db = DBLayer()
-    df = db.query_df("SELECT * FROM [dbo_GOLD].[fact_statistiques_apf]")
+    df = db.query_df("SELECT TOP 10 * FROM [dbo_GOLD].[fact_statistiques_apf]")
     print(db.source)   # "fabric" or "unavailable"
     print(db.status)
 """
@@ -110,15 +110,9 @@ class DBLayer:
             return
 
         try:
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import create_engine, event, text
             import struct
 
-            # Fabric uses access-token auth via the SQL_COPT_SS_ACCESS_TOKEN
-            # connect attribute (not the AccessToken= keyword in the conn str,
-            # which is unreliable across pyodbc versions).
-            token_bytes = token.encode("utf-16-le")
-            token_struct = struct.pack(f"=I{len(token_bytes)}s",
-                                       len(token_bytes), token_bytes)
             SQL_COPT_SS_ACCESS_TOKEN = 1256
 
             conn_str = (
@@ -132,11 +126,23 @@ class DBLayer:
             encoded = urllib.parse.quote_plus(conn_str)
             engine = create_engine(
                 f"mssql+pyodbc:///?odbc_connect={encoded}",
-                connect_args={
-                    "attrs_before": {SQL_COPT_SS_ACCESS_TOKEN: token_struct},
-                },
                 pool_pre_ping=True,
             )
+
+            # Refresh the AAD token on every new physical connection so that
+            # tokens expiring after ~1 hour never cause error 18456.
+            @event.listens_for(engine, "do_connect")
+            def provide_token(dialect, conn_rec, cargs, cparams):
+                fresh_token = self._get_aad_token()
+                if not fresh_token:
+                    raise RuntimeError(
+                        "DBLayer: Could not refresh AAD token for Fabric connection"
+                    )
+                token_bytes = fresh_token.encode("utf-16-le")
+                token_struct = struct.pack(
+                    f"=I{len(token_bytes)}s", len(token_bytes), token_bytes
+                )
+                cparams["attrs_before"] = {SQL_COPT_SS_ACCESS_TOKEN: token_struct}
 
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -253,6 +259,19 @@ class DBLayer:
         # Block stacked queries (e.g. "SELECT ...; DROP TABLE ...")
         if ";" in s:
             raise PermissionError("Multi-statement queries are not allowed.")
+
+        # Guard against accidental raw fact-table scans. The post-execution
+        # row cap below protects Python memory, but it cannot save Fabric from
+        # doing the full scan first. Analytical queries should aggregate in SQL
+        # or explicitly use TOP for inspection.
+        if (
+            _re.search(r"\bselect\s+\*\b", s, _re.IGNORECASE)
+            and not _re.search(r"\btop\s*(?:\(|\d)", s, _re.IGNORECASE)
+            and not _re.search(r"\bcount\s*\(", s, _re.IGNORECASE)
+        ):
+            raise PermissionError(
+                "Raw SELECT * without TOP is not allowed. Aggregate in SQL or use SELECT TOP N."
+            )
 
         df = self.query_df(s)
         if len(df) > self.SAFE_QUERY_ROW_LIMIT:

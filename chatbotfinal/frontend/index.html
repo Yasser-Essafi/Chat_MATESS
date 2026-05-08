@@ -13,6 +13,8 @@
 
   <!-- Marked.js (markdown) -->
   <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+  <!-- DOMPurify (sanitize model-generated markdown HTML) -->
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
   <!-- Highlight.js (code) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
@@ -2315,6 +2317,8 @@ class StatourApp {
 
   _buildChart(chartUrl, idx) {
     const chartId = `chart-${idx}`;
+    const safeUrl = String(chartUrl || '');
+    if (!safeUrl.startsWith('/charts/')) return '';
     return `
       <div class="chart-wrapper" id="${chartId}">
         <div class="chart-header" onclick="app._toggleChart('${chartId}')">
@@ -2326,8 +2330,8 @@ class StatourApp {
         </div>
         <div class="chart-body" id="${chartId}-body">
           <iframe class="chart-iframe"
-                  src="${chartUrl}"
-                  sandbox="allow-scripts allow-same-origin"
+                  src="${this._esc(safeUrl)}"
+                  sandbox="allow-scripts"
                   loading="lazy"
                   title="Graphique analytique"></iframe>
         </div>
@@ -2390,7 +2394,17 @@ class StatourApp {
   _renderMarkdown(text) {
     if (!text) return '';
     try {
-      return marked.parse(text);
+      if (typeof marked === 'undefined') {
+        return this._esc(text).replace(/\n/g, '<br>');
+      }
+      const html = marked.parse(text);
+      if (typeof DOMPurify !== 'undefined') {
+        return DOMPurify.sanitize(html, {
+          ADD_ATTR: ['target'],
+          ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+        });
+      }
+      return this._esc(text).replace(/\n/g, '<br>');
     } catch {
       return this._esc(text).replace(/\n/g, '<br>');
     }
@@ -2569,10 +2583,23 @@ class StatourApp {
 ═══════════════════════════════════════════════════════════════ */
 if (typeof marked !== 'undefined') {
   const renderer = new marked.Renderer();
+  const escapeHtml = (value) => String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  const safeHref = (href) => {
+    try {
+      const url = new URL(String(href || ''), window.location.origin);
+      return ['http:', 'https:', 'mailto:'].includes(url.protocol) ? escapeHtml(url.href) : '#';
+    } catch {
+      return '#';
+    }
+  };
 
   // Open links in new tab
   renderer.link = (href, title, text) =>
-    `<a href="${href}" target="_blank" rel="noopener noreferrer"${title ? ` title="${title}"` : ''}>${text}</a>`;
+    `<a href="${safeHref(href)}" target="_blank" rel="noopener noreferrer"${title ? ` title="${escapeHtml(title)}"` : ''}>${text}</a>`;
 
   marked.setOptions({
     renderer,

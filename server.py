@@ -341,18 +341,12 @@ def list_conversations():
 @app.route("/api/conversations", methods=["POST"])
 def new_conversation():
     mgr = _get_mgr()
+    conv = mgr.new_conversation()
     try:
         orch = _get_orch()
-        orch.last_agent = None
-        orch.conversation_log.clear()
-        orch.message_count = 0
-        orch.routing_history.clear()
-        orch._session_summary = ""
-        orch._last_summarized_at = 0
-        orch._classify_cache.clear()
+        orch.reset_conversation_state(conv.id)
     except Exception:
         pass
-    conv = mgr.new_conversation()
     return jsonify({"id": conv.id, "title": conv.title, "created_at": conv.created_at})
 
 
@@ -371,13 +365,7 @@ def activate_conversation(cid):
         return jsonify({"error": "Not found"}), 404
     try:
         orch = _get_orch()
-        orch.last_agent = None
-        orch.conversation_log.clear()
-        orch.message_count = 0
-        orch.routing_history.clear()
-        orch._session_summary = ""
-        orch._last_summarized_at = 0
-        orch._classify_cache.clear()
+        orch.load_conversation_state(cid, conv.messages)
     except Exception:
         pass
     return jsonify({"success": True})
@@ -396,10 +384,7 @@ def clear_all():
     count = mgr.clear_all_history()
     try:
         orch = _get_orch()
-        orch.last_agent = None
-        orch.conversation_log.clear()
-        orch.routing_history.clear()
-        orch.message_count = 0
+        orch.clear_runtime_states()
     except Exception:
         pass
     return jsonify({"cleared": count})
@@ -484,9 +469,9 @@ def chat():
                                  text, False, 0.0, 0.0, None, cid))
 
         # ── Normal routing ──
-        result = orch.route(message)
+        result = orch.route(message, conversation_id=cid)
 
-        chart_path = extract_chart_path(result["response"])
+        chart_path = result.get("chart_path") or extract_chart_path(result["response"])
         chart_url = None
         if chart_path and os.path.exists(chart_path):
             chart_url = "/charts/" + os.path.basename(chart_path)

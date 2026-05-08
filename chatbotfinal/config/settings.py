@@ -33,6 +33,10 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 # Get a free key at https://api.search.brave.com (2000 queries/month free tier)
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "").strip()
 
+# Exa.ai — semantic search for causal/research queries ("pourquoi" questions)
+# Get key at: https://exa.ai — free tier 1000 queries/month
+EXA_API_KEY = os.getenv("EXA_API_KEY", "").strip()
+
 # Search backend selector. Values:
 #   "tavily" — default, current behaviour
 #   "brave"  — use Brave Search exclusively (~30% faster, requires BRAVE_API_KEY)
@@ -43,7 +47,7 @@ SEARCH_BACKEND = os.getenv("SEARCH_BACKEND", "auto").strip().lower()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Microsoft Fabric Lakehouse Gold — SQL Analytics Endpoint
-# Set these env vars in .env to enable Fabric connectivity; leave blank for Excel fallback.
+# Set these env vars in .env to enable Fabric connectivity.
 FABRIC_SQL_ENDPOINT = os.getenv("FABRIC_SQL_ENDPOINT", "").strip()    # e.g. xyz.datawarehouse.fabric.microsoft.com
 FABRIC_DATABASE     = os.getenv("FABRIC_DATABASE", "").strip()         # e.g. LH_03_MTAESS_GOLD
 FABRIC_SCHEMA       = os.getenv("FABRIC_SCHEMA", "dbo").strip()        # default to dbo, override e.g. dbo_GOLD
@@ -126,8 +130,16 @@ ANALYTICS_REASONING_EFFORT  = "low"
 # ══════════════════════════════════════════════════════════════════════════════
 # History Limits
 # ══════════════════════════════════════════════════════════════════════════════
-MAX_HISTORY_MESSAGES = 20    # Hard cap on stored messages
-MAX_HISTORY_CHARS = 8000     # Character budget for conversation history
+MAX_HISTORY_MESSAGES = 32    # Hard cap before folding old messages into a summary
+MAX_HISTORY_CHARS = 16000    # Character budget for recent non-summary history
+
+# Context folding keeps a rolling summary plus a verbatim recent window.
+# Six exchanges is a better default for analytical follow-ups than the old
+# three-exchange window, while staying small enough for latency.
+CONTEXT_RECENT_EXCHANGES = int(os.getenv("CONTEXT_RECENT_EXCHANGES", "6"))
+CONTEXT_SUMMARY_MAX_TOKENS = int(os.getenv("CONTEXT_SUMMARY_MAX_TOKENS", "350"))
+ORCHESTRATOR_RECENT_EXCHANGES = int(os.getenv("ORCHESTRATOR_RECENT_EXCHANGES", "6"))
+ORCHESTRATOR_SUMMARY_MAX_TOKENS = int(os.getenv("ORCHESTRATOR_SUMMARY_MAX_TOKENS", "260"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -146,7 +158,7 @@ SEARCH_CACHE_MAX_SIZE = 200
 # Execution Safety
 # ══════════════════════════════════════════════════════════════════════════════
 EXEC_TIMEOUT_SECONDS = 30    # Max time for analytics code execution
-MAX_CODE_RETRIES = 0         # No retries — if code fails, return error immediately (1 LLM call max)
+MAX_CODE_RETRIES = 2
 
 # ── Data Loading ──
 # Files to skip when auto-loading from DATA_DIR (exact base names, no extension)
@@ -207,9 +219,17 @@ def validate_config(require_tavily: bool = True) -> None:
             f"got: '{AZURE_OPENAI_ENDPOINT[:50]}'"
         )
 
-    # Tavily — required for researcher agent
-    if require_tavily and (not TAVILY_API_KEY or not TAVILY_API_KEY.strip()):
-        errors.append("Missing: TAVILY_API_KEY (required for web search)")
+    # Web search — require at least one configured backend.
+    if require_tavily:
+        if SEARCH_BACKEND == "brave":
+            if not BRAVE_API_KEY:
+                errors.append("Missing: BRAVE_API_KEY (required when SEARCH_BACKEND=brave)")
+        elif SEARCH_BACKEND == "auto":
+            if not TAVILY_API_KEY and not BRAVE_API_KEY:
+                errors.append("Missing: TAVILY_API_KEY or BRAVE_API_KEY (required for SEARCH_BACKEND=auto)")
+        else:
+            if not TAVILY_API_KEY:
+                errors.append("Missing: TAVILY_API_KEY (required when SEARCH_BACKEND=tavily)")
 
     # Paths — validate data directory exists
     if not os.path.isdir(DATA_DIR):
@@ -260,155 +280,43 @@ SI LA QUESTION DÉPASSE TON RÔLE:
 - Le routage est automatique, mais tu peux orienter l'utilisateur""",
 
 
-    "researcher": """Tu es le chercheur expert de STATOUR, la plateforme du Ministère du Tourisme du Maroc.
-Tu as accès à deux sources distinctes que tu dois utiliser et citer correctement :
+    "researcher": """Tu es le Chercheur Expert de STATOUR, la plateforme analytique du Ministère du Tourisme du Maroc (MTAESS).
 
-SOURCES DISPONIBLES:
-A) WEB (section "WEB:" dans RESULTATS) — résultats Tavily internet en temps réel. Cite la vraie source : "(le360)", "(UNWTO)", "(HCP)", "(Banque Mondiale)", etc.
-B) BASE INTERNE APF (section "DOCS:" dans RESULTATS) — notre table statistique interne des arrivées aux postes frontières du Maroc (données mensuelles 2019–Fév 2026). Cite comme : "(APF — base interne)" ou "(données APF internes)".
+Tu as accès à 2 outils de recherche :
+- web_search : pour les news, données officielles récentes, événements
+- semantic_search : pour analyser des tendances, expliquer des causes, contexte international
 
-RÈGLES DE CITATION:
-- Pour les chiffres d'arrivées, flux, pays de résidence, voies → cite "(APF — base interne)"
-- Pour les facteurs externes, causes, tendances mondiales, actualités → cite la source web réelle
-- JAMAIS inventer une source. JAMAIS citer "Données officielles STATOUR" ou "expertise STATOUR" — c'est vague et trompeur.
-- JAMAIS mentionner de noms de fichiers (.md, .csv, .xlsx, etc.)
+PROCESSUS DE RECHERCHE :
+1. Analyse la question — détermine si elle est factuelle ou causale
+2. Si factuelle récente → web_search avec query précise
+3. Si causale ou contextuelle → semantic_search + complète avec web_search si besoin
+4. Synthétise les résultats en 5-8 lignes maximum
 
-RÈGLES GÉNÉRALES:
-1. Présente TOUJOURS les résultats comme TES découvertes.
-2. NE DIS JAMAIS "je ne peux pas chercher" ou "voulez-vous que je recherche". JAMAIS.
-3. Si les résultats sont incomplets, COMPLÈTE avec tes connaissances d'expert tourisme.
-4. Si l'utilisateur confirme ("oui", "vas-y"), RÉPONDS avec des FAITS, pas une question.
-5. 5-8 lignes MAX. Chiffres précis. Sources entre parenthèses.
-6. RÉPONDS DANS LA LANGUE DE L'UTILISATEUR (français/anglais/arabe).
-7. Comprends les typos et fautes sans les corriger.
-8. Ne jamais fabriquer de sources. Cite des sources publiques fiables.
-9. Pour les questions sur des FACTEURS EXTERNES (causes, conjoncture, géopolitique, aérien, hôtellerie) → appuie-toi prioritairement sur WEB, pas sur APF.
-10. Ne JAMAIS répéter des informations déjà mentionnées dans l'historique de la conversation.""",
+CONNAISSANCE MÉTIER MTAESS :
+- APF = Arrivées aux Postes Frontières (données DGSN, mensuelles)
+- EHTC = ~5000 Établissements d'Hébergement Touristique Classés
+- STDN = Télédéclarations électroniques des nuitées
+- STATOUR = Plateforme de saisie manuelle des délégations
+- MRE = Marocains Résidant à l'Étranger (~5M diaspora)
+- TES = Touristes Étrangers Séjournistes (non-marocains)
+- Estimatif = calcul statistique des nuitées pour établissements non-déclarants
+- Opération Marhaba = programme annuel juin-sept pour accueil des MRE
+- Vision 2030 = objectif 26M arrivées TES + 120Mrd MAD recettes
+
+SOURCES ET CITATIONS :
+- Cite toujours la source entre parenthèses : (le360), (ONMT), (HCP), (UNWTO), (APF — base interne)
+- JAMAIS inventer une source ou citer un nom de fichier
+- Pour les données APF internes : "(APF — base interne MTAESS)"
+
+RÈGLES ABSOLUES :
+- JAMAIS "je ne peux pas chercher" ou "voulez-vous que je recherche"
+- Si données insuffisantes, complète avec expertise tourisme marocain
+- Réponds dans la langue de l'utilisateur (français/anglais/arabe)
+- Ne JAMAIS mentionner de noms de fichiers (.md, .xlsx, .csv, etc.)
+- Structure : 1) Chiffres clés 2) Analyse contextuelle 3) Perspective/benchmark si pertinent""",
 
 
-    "analytics": """You are the Data Analytics Agent for STATOUR, the tourism statistics platform of Morocco's Ministry of Tourism.
-You generate **T-SQL queries** that run against Microsoft Fabric Lakehouse Gold (schema [dbo_GOLD]) via the sandbox helper `sql(query)`.
-
-⚠️ RÈGLE ABSOLUE — PRÉCISION TEMPORELLE :
-- Mois mentionné → toujours filtrer par mois + année.
-  Exemple : `WHERE YEAR(date_stat) = 2026 AND MONTH(date_stat) = 2`
-- Jamais de total annuel quand un mois précis est demandé.
-- Numéros : Janvier=1, Février=2, Mars=3, Avril=4, Mai=5, Juin=6, Juillet=7, Août=8, Septembre=9, Octobre=10, Novembre=11, Décembre=12.
-
-YOUR ROLE: Compose précise T-SQL queries that answer exactly what the user asked.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RESPONSE MODE — choose based on the question:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-MODE A — NARRATIVE (for general questions: "flux", "comment", "comment se porte", "tendance", "résumé"):
-  → Write 2-4 sentences of analysis with key numbers in bold: "**1,372,858** arrivées", "dont **77%** par voie aérienne".
-  → NO preamble about what the code does. Start directly with the finding.
-  → Example: "Février 2026 affiche **1,372,858** arrivées, en légère baisse de **-1,7%** vs Février 2025. La voie aérienne domine avec **77%** des entrées, et la France reste le premier marché avec **415,076** visiteurs."
-
-MODE B — TABLE (for specific breakdown questions: "pays de résidence", "voies", "régions", "top N", "classement", "répartition par"):
-  → Write 1 short sentence introducing the table. Start directly with the finding.
-  → Print ONE table per category, each preceded by a bold label printed in the code.
-  → Each table MUST have a blank line before and after it.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULES — NEVER BREAK THESE:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- NEVER ask clarifying questions. NEVER say "Voulez-vous...", "Souhaitez-vous...", "Quel format...". Just answer with the most comprehensive and reasonable interpretation.
-- If the question is ambiguous (e.g. "l'année précédente"): assume the most useful answer — provide total annual + monthly breakdown + top pays de résidence + voie breakdown. Do it all.
-- NEVER use "PART 1", "PART 2", "INSIGHT:", "CODE:", "ANALYSIS:", "Résultats:" labels.
-- YOUR TEXT runs BEFORE the ```python block. Write ONLY the final conclusion — no setup, no description of what will be computed. Example of CORRECT text: "Les MRE totalisent **33,268,843** arrivées sur toute la période disponible." Example of FORBIDDEN text: "Ci-dessous un script qui calcule..." / "Le code suivant affiche..." / "Voici le calcul :".
-- NEVER mention "script", "code", "programme", "ci-dessous", "exécutez", "calculé par" in your text.
-- NEVER mention filenames, partial coverage, or day-level dates. Data is monthly.
-- If data for the requested period does NOT exist: "Aucun enregistrement pour [période] dans **apf_data**."
-
-CHART RULES — CRITICAL:
-- ONLY include fig.write_html('CHART_PATH') when user EXPLICITLY uses words: graphique, chart, graph, visualise, affiche, trace, plot, courbe, diagramme, histogram, heatmap, montre.
-- If NOT explicitly requested: ONLY print() statements. Do NOT call fig.write_html.
-- NEVER print the chart path, filename, or save location. FORBIDDEN: print(f"Charte sauvegardée..."), print(chart_path), any mention of .html path. Just call fig.write_html('CHART_PATH') silently.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CHOIX DE TABLE — basé sur la question (CRITIQUE) :
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Mots-clés HÉBERGEMENT/STDN → [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] :
-  nuitées, arrivées hôtelières, hébergement, hôtel, EHTC, STDN, établissement, délégation,
-  type d'hébergement, maison d'hôtes, camping, riad, chambre, capacité, région hôtelière.
-  Métriques disponibles : nuitees, arrivees (≠ arrivées APF).
-
-• Mots-clés APF/FRONTIÈRES → [dbo_GOLD].[fact_statistiques_apf] :
-  arrivées (postes frontières), MRE, TES, voie d'entrée, poste_frontiere, nationalité de
-  résidence, continent, flux touristique.
-  Métriques disponibles : mre, tes (total = mre + tes).
-
-NE JAMAIS répondre une question sur les nuitées avec des données APF (MRE/TES) et vice-versa.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CODE RULES (SQL-on-demand) :
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Use `sql("SELECT ...")` to query Fabric. NE JAMAIS `pd.read_sql`, `read_excel`, `read_csv` — bloqués.
-- Toujours préfixer les tables avec `[dbo_GOLD]` (ex: `[dbo_GOLD].[fact_statistiques_apf]`).
-- Toujours AGRÉGER côté SQL (GROUP BY, SUM, COUNT, TOP N) — jamais ramener des millions de lignes.
-- Filtres temporels SQL : `WHERE YEAR(date_stat) = 2026 AND MONTH(date_stat) = 2`.
-- Pré-loaded libs : pd, np, px (plotly.express), go (plotly.graph_objects), to_md(df), MONTH_NAMES_FR.
-- NaN / division-par-zéro : guard tes pct_change. Si NaN → "N/A". Jamais "+nan%" dans la sortie.
-- Comparaisons "cette année (2026)" vs "année précédente (2025)" : ne compare que les mois existant en 2026 (Jan-Fév pour APF). Pas de total annuel 2026.
-- Données mensuelles (date_stat = 1er du mois). Pas de jour exact.
-- Si tu reçois [Données collectées par le Chercheur STATOUR] : crée le DataFrame depuis ces données (pd.DataFrame({...})) — n'appelle pas `sql()`.
-- Renomme les colonnes avant d'afficher :
-    nationalite | nationalite_name → Pays de résidence
-    region | region_name           → Région
-    voie                           → Voie
-    continent                      → Continent
-    mre                            → MRE
-    tes                            → TES
-    total                          → Arrivées
-    nuitees                        → Nuitées
-    arrivees                       → Arrivées
-    type_eht_libelle               → Type d'hébergement
-    delegation_name                → Délégation
-    etablissement_libelle_fr       → Établissement
-- Tableaux : `print(to_md(result))` (formate les nombres avec virgules automatiquement).
-- Jamais `.to_string()`. Tableaux séparés par une ligne vide : `print("\\n**Label:**")` puis `print(to_md(t))`.
-- Top N : utilise `TOP N` côté SQL.
-- Nombres scalaires : `f"{int(value):,}"`.
-- Réponds dans la langue de l'utilisateur (français/anglais/arabe).
-
-EXAMPLE — total + breakdowns en T-SQL :
-```python
-# Total Février 2026
-res = sql('''
-  SELECT SUM(mre)+SUM(tes) AS total_arrivees
-    FROM [dbo_GOLD].[fact_statistiques_apf]
-    WHERE YEAR(date_stat) = 2026 AND MONTH(date_stat) = 2
-''')
-total = int(res.iloc[0,0])
-print(f"Février 2026 — Total arrivées : **{total:,}**")
-
-# Top 5 pays
-nat = sql('''
-  SELECT TOP 5 nationalite AS [Pays de résidence],
-               SUM(mre+tes) AS [Arrivées]
-    FROM [dbo_GOLD].[fact_statistiques_apf]
-    WHERE YEAR(date_stat) = 2026 AND MONTH(date_stat) = 2
-    GROUP BY nationalite ORDER BY [Arrivées] DESC
-''')
-print("\\n**Top 5 pays de résidence :**")
-print(to_md(nat))
-
-voie = sql('''
-  SELECT voie AS [Voie], SUM(mre+tes) AS [Arrivées]
-    FROM [dbo_GOLD].[fact_statistiques_apf]
-    WHERE YEAR(date_stat) = 2026 AND MONTH(date_stat) = 2
-    GROUP BY voie ORDER BY [Arrivées] DESC
-''')
-print("\\n**Répartition par voie :**")
-print(to_md(voie))
-```
-
-CHART GUIDELINES (only when requested):
-- Bar: rankings | Line: time trends | Pie: proportions | Stacked bar: segment comparisons
-- Colors: ['#1B4F72', '#C0392B', '#27AE60', '#F39C12', '#8E44AD', '#1ABC9C']
-- Template: plotly_white. Always include title, axis labels, data labels.""",
+    "analytics": "You are the STATOUR Data Analytics Agent for MTAESS Morocco. Generate T-SQL queries via sql() function.",
 
 
     "orchestrator": """Tu es le cerveau de routage de STATOUR, la plateforme du Ministère du Tourisme du Maroc.

@@ -1,7 +1,7 @@
 """
 STATOUR Data Analytics Agent — Fixed
 ======================================
-Handles ANY dataset (Excel/CSV). Auto-detects schema.
+Catalogs Microsoft Fabric Gold tables and analyzes them through SQL-on-demand.
 Connected to Web Search for context enrichment.
 Generates interactive Plotly charts.
 
@@ -11,7 +11,7 @@ Fixes from original:
 - Thread-safe stdout capture (no more sys.stdout swap)
 - Fixed retry loop off-by-one (was range(1, MAX_RETRIES) = only 2 retries)
 - Proper temperature (0.1, not 1.0) for code generation
-- Proper max_tokens (4096, not 1024) to prevent code truncation
+- Proper max_completion_tokens usage for reasoning-model calls
 - DataFrame copy in exec to prevent mutation of source data
 - Structured logging throughout
 - Integrated with shared cache and logger
@@ -105,9 +105,9 @@ ANALYTICS_MAX_HISTORY = 20
 
 # French month names for date enrichment
 MONTH_NAMES_FR = {
-    1: "Janvier", 2: "Fevrier", 3: "Mars", 4: "Avril",
-    5: "Mai", 6: "Juin", 7: "Juillet", 8: "Aout",
-    9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Decembre",
+    1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
+    5: "Mai", 6: "Juin", 7: "Juillet", 8: "Août",
+    9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -163,6 +163,13 @@ SAFE_BUILTINS = {
     "str": str, "sum": sum, "tuple": tuple, "type": type,
     "zip": zip,
     "True": True, "False": False, "None": None,
+    # Exception types — required for try/except blocks in generated code
+    "Exception": Exception, "BaseException": BaseException,
+    "ValueError": ValueError, "TypeError": TypeError,
+    "KeyError": KeyError, "IndexError": IndexError,
+    "AttributeError": AttributeError, "NameError": NameError,
+    "ZeroDivisionError": ZeroDivisionError, "RuntimeError": RuntimeError,
+    "StopIteration": StopIteration, "OverflowError": OverflowError,
     "__import__": _safe_import,  # allow safe imports (pandas, numpy, plotly...)
     # Note: print is injected separately as safe_print
 }
@@ -325,9 +332,9 @@ class DataAnalyticsAgent(BaseAgent):
     Data analytics agent for STATOUR.
 
     Features:
-        - Auto-loads all Excel/CSV files from DATA_DIR
-        - Auto-detects schema and enriches date columns
-        - Generates Python code via LLM for data analysis
+        - Catalogs Fabric Gold tables without bulk-loading their contents
+        - Auto-detects schema and low-cardinality sample values
+        - Generates T-SQL/Python code via LLM for data analysis
         - Executes code in secure sandbox with timeout
         - Creates interactive Plotly charts
         - Auto-retries with error context when code fails
@@ -350,7 +357,7 @@ class DataAnalyticsAgent(BaseAgent):
         self._apf_df = None     # APF DataFrame kept in memory for KPI/prediction
         self._db = None         # DBLayer reference for SQL-on-demand queries
 
-        logger.info("Scanning data folder: %s", DATA_DIR)
+        logger.info("Cataloging Fabric Gold metadata")
         self._auto_load_all_data()
 
         # ── Build KPI cache from active dataset ──
@@ -410,8 +417,9 @@ class DataAnalyticsAgent(BaseAgent):
         """
         msg_lower = message.lower()
 
-        year_match = re.search(r'\b(20[12]\d)\b', message)
-        year = int(year_match.group(1)) if year_match else None
+        # Collect ALL years mentioned (e.g. "2024 vs 2025" → [2024, 2025])
+        year_matches = re.findall(r'\b(20[12]\d)\b', message)
+        years = list(dict.fromkeys(int(y) for y in year_matches))  # dedup, preserve order
 
         month_num = None
         month_name = None
@@ -421,8 +429,50 @@ class DataAnalyticsAgent(BaseAgent):
                 month_name = display
                 break
 
-        if not year and not month_num:
+        if not years and not month_num:
             return ""
+
+        # Multi-year comparison: emit IN(...) so neither year is filtered out
+        if len(years) > 1:
+            years_sql = ", ".join(str(y) for y in years)
+            years_label = " vs ".join(str(y) for y in years)
+            base_constraint = (
+                f"\n\nPériode demandée : comparaison {years_label}.\n"
+                f"Filtre SQL attendu : WHERE YEAR(date_stat) IN ({years_sql})"
+            )
+            # When 2026 is in an APF comparison, force month-alignment (Jan–Feb only
+            # for APF — confirmed partial year). Hébergement may have more 2026 months,
+            # so we only apply this constraint when the query is clearly about APF.
+            PARTIAL_YEAR = 2026
+            _APF_SIGNALS = ["apf", "frontière", "frontiere", "poste", "mre", "tes",
+                            "voie", "continent", "diaspora"]
+            is_apf_query = any(kw in msg_lower for kw in _APF_SIGNALS)
+            if PARTIAL_YEAR in years and is_apf_query:
+                last_month = self.kpi_cache.get("last_month", 2) if self.kpi_cache else 2
+                months_list = ", ".join(str(m) for m in range(1, last_month + 1))
+                _MO_NAMES = {
+                    1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
+                    5: "Mai", 6: "Juin", 7: "Juillet", 8: "Août",
+                    9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
+                }
+                last_month_name = _MO_NAMES.get(last_month, str(last_month))
+                base_constraint += (
+                    f" AND MONTH(date_stat) IN ({months_list})\n\n"
+                    f"⚠️ RÈGLE APF : la table APF 2026 ne contient que Janvier–{last_month_name}. "
+                    f"Filtrer LES DEUX années sur MONTH(date_stat) IN ({months_list}). "
+                    f"Indiquer dans la réponse : 'Comparaison Janvier–{last_month_name} uniquement "
+                    f"(APF — données partielles 2026)'."
+                )
+            elif PARTIAL_YEAR in years:
+                # Ambiguous or hébergement query — advise to verify coverage first
+                base_constraint += (
+                    f"\n\n⚠️ NOTE : pour 2026, vérifier la couverture réelle avec "
+                    f"SELECT DISTINCT MONTH(date_stat) avant de comparer les années. "
+                    f"L'APF s'arrête à Février 2026 ; l'hébergement peut avoir plus de mois."
+                )
+            return base_constraint
+
+        year = years[0] if years else None
 
         if year and month_num:
             return (
@@ -755,37 +805,6 @@ class DataAnalyticsAgent(BaseAgent):
     # System Prompt Builder
     # ──────────────────────────────────────────────────────────────────────
 
-    # SQL JOIN paths between fact and dim tables. The LLM uses T-SQL JOINs
-    # against Fabric (server-side) — much faster than loading 7 M rows into pandas.
-    _TABLE_RELATIONS = """
-RELATIONS ENTRE TABLES (Fabric Lakehouse Gold, schéma [dbo_GOLD]) :
-
-• [dbo_GOLD].[fact_statistiques_apf]
-    └── grain : (date_stat mensuel, nationalite, poste_frontiere, voie)
-    └── métriques : mre, tes  (total = mre + tes)
-    └── nationalite = pays de résidence
-
-• [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees]   (7,3 M lignes)
-    └── grain : (date_stat mensuel, eht_id, nationalite_name, categorie_name)
-    └── métriques : arrivees, nuitees
-    └── JOIN catégorie → type d'EHT :
-        JOIN [dbo_GOLD].[gld_dim_categories_classements] dc
-             ON dc.categorie_name = f.categorie_name
-        → expose dc.type_eht_libelle (Hôtels, Maisons d'hôtes, Campings, ...)
-    └── JOIN établissement :
-        JOIN [dbo_GOLD].[gld_dim_etablissements_hebergements] de
-             ON CAST(de.etablissement_id_genere AS VARCHAR) = f.eht_id
-        → expose de.etablissement_libelle_fr, de.capacite_nbr_chambre_actuel,
-                  de.delegation_id, de.delegation_name
-
-• [dbo_GOLD].[gld_dim_etablissements_hebergements]   (5 843 EHT)
-    └── JOIN délégation :
-        JOIN [dbo_GOLD].[gld_dim_delegations] dd
-             ON dd.delegation_bk = de.delegation_id
-
-• [dbo_GOLD].[gld_dim_delegations]   (26 DRT/DPT)
-"""
-
     def _build_system_prompt(self) -> str:
         """Build the system prompt — SQL-on-demand mode.
 
@@ -793,11 +812,6 @@ RELATIONS ENTRE TABLES (Fabric Lakehouse Gold, schéma [dbo_GOLD]) :
         execute them via the sandbox `sql()` helper. No DataFrames are
         pre-loaded into memory.
         """
-        base = SYSTEM_PROMPTS.get(
-            "analytics",
-            "You are a data analytics agent."
-        )
-
         schemas = []
         samples = []
         for name, info in self.datasets.items():
@@ -811,68 +825,90 @@ RELATIONS ENTRE TABLES (Fabric Lakehouse Gold, schéma [dbo_GOLD]) :
         ds_list = ", ".join(self.datasets.keys()) if self.datasets else "None"
         active = self.active_dataset_name or "None"
 
-        return (
-            f"{base}\n\n"
-            f"{self._TABLE_RELATIONS}\n"
-            f"TABLES DISPONIBLES (Fabric SQL Analytics Endpoint) : {ds_list}\n"
+        base_intro = (
+            "Tu génères du T-SQL exécuté sur Microsoft Fabric Lakehouse Gold via la fonction sql().\n"
+            "Réponds UNIQUEMENT avec du code Python dans un bloc ```python```.\n\n"
+            "━━ RÈGLE D'OR : AMBIGUÏTÉ \"ARRIVÉES\" ━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "\"arrivées\" signifie 2 choses différentes :\n"
+            "- APF (postes frontières) → fact_statistiques_apf (mre + tes)\n"
+            "- Hébergement (hotels) → fact_statistiqueshebergementnationaliteestimees (arrivees)\n"
+            "Si ambigu → fournir LES DEUX métriques dans la réponse.\n\n"
+            "━━ ROUTAGE OBLIGATOIRE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "HÉBERGEMENT → [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees]\n"
+            "  Mots-clés : nuitées, hébergement, hôtel, EHTC, STDN, TO, taux occupation,\n"
+            "               établissement, délégation, maison d'hôtes, capacité, chambre\n"
+            "  Métriques : nuitees, arrivees\n\n"
+            "FRONTIÈRES → [dbo_GOLD].[fact_statistiques_apf]\n"
+            "  Mots-clés : postes frontières, APF, MRE, TES, voie, frontière, pays de résidence, continent\n"
+            "  Métriques : mre, tes (total = mre + tes)\n\n"
+            "JAMAIS croiser les métriques entre les deux tables.\n\n"
+            "━━ CONTEXTE MÉTIER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "- \"nationalite\" en SQL = pays de résidence du voyageur (PAS nationalité ethnique)\n"
+            "- Renommer dans l'output : nationalite → \"Pays de résidence\"\n"
+            "- MRE = Marocains diaspora | TES = Touristes étrangers\n"
+            "- date_stat = toujours 1er du mois (mensuel, pas quotidien)\n"
+            "- COUVERTURE 2026 PAR TABLE :\n"
+            "  • fact_statistiques_apf (APF) : UNIQUEMENT Janvier–Février 2026 confirmés.\n"
+            "    → Toute comparaison APF 2026 vs N-1 DOIT restreindre les deux années à Jan–Fév.\n"
+            "    → Signaler dans la réponse : 'Comparaison Jan–Fév uniquement (APF, données partielles 2026)'.\n"
+            "  • fact_statistiqueshebergementnationaliteestimees (hébergement) : mois 2026 potentiellement\n"
+            "    supérieurs à Février. Toujours vérifier avec SELECT DISTINCT MONTH(date_stat) avant de conclure.\n"
+            "    → Ne jamais supposer que l'hébergement s'arrête à Février 2026.\n\n"
+            f"━━ TABLES DISPONIBLES (Fabric SQL Analytics Endpoint) ━━━━━━━━\n"
+            f"Tables : {ds_list}\n"
             f"TABLE PAR DÉFAUT : [dbo_GOLD].[{active}]\n\n"
-            f"SCHÉMAS DÉTAILLÉS :\n{schemas_text}\n\n"
-            f"{values_text}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"MODE SQL-ON-DEMAND — comment répondre :\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"1. Tu as une fonction `sql(query)` dans le sandbox qui exécute du T-SQL\n"
-            f"   sur Fabric et renvoie un pandas DataFrame (max 100 000 lignes).\n"
-            f"2. NE JAMAIS écrire `pd.read_sql`, `read_excel`, `read_csv` — usage\n"
-            f"   bloqué. Toujours passer par `sql(...)`.\n"
-            f"3. Préfixer TOUTES les tables avec [dbo_GOLD] :\n"
-            f"   `SELECT ... FROM [dbo_GOLD].[fact_statistiques_apf] WHERE ...`\n"
-            f"4. Toujours AGRÉGER côté SQL (GROUP BY, SUM, COUNT, TOP N) — ne jamais\n"
-            f"   ramener de gros résultats côté pandas.\n"
-            f"5. Filtres temporels : `WHERE YEAR(date_stat) = 2026 AND MONTH(date_stat) = 2`.\n"
-            f"6. Pré-loaded libs : pd, np, px (plotly.express), go (plotly.graph_objects),\n"
-            f"   to_md(df), MONTH_NAMES_FR.\n"
-            f"7. Chart : générer après `sql(...)` à partir du petit DataFrame ;\n"
-            f"   sauvegarder UNIQUEMENT si l'utilisateur a demandé un graphique :\n"
-            f"   `fig.write_html('CHART_PATH')`\n"
-            f"8. Toujours `print(to_md(result))` pour les tableaux.\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"ROUTAGE DE TABLE (RÈGLE ABSOLUE) :\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• nuitées / hébergement / hôtel / EHTC / STDN / arrivées hôtelières /\n"
-            f"  établissement / délégation / type d'hébergement / maison d'hôtes / camping\n"
-            f"  → TOUJOURS [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees]\n"
-            f"  → métriques : nuitees, arrivees\n\n"
-            f"• arrivées aux postes frontières / MRE / TES / voie d'entrée / frontière /\n"
-            f"  poste_frontiere / nationalité de résidence (APF) / continent (APF)\n"
-            f"  → TOUJOURS [dbo_GOLD].[fact_statistiques_apf]\n"
-            f"  → métriques : mre, tes (total = mre + tes)\n\n"
-            f"JAMAIS répondre une question sur les nuitées avec APF (mre/tes), ni l'inverse.\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"EXEMPLES T-SQL :\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"# Total APF d'une année\n"
-            f"SELECT SUM(mre)+SUM(tes) AS total_arrivees\n"
-            f"  FROM [dbo_GOLD].[fact_statistiques_apf]\n"
-            f"  WHERE YEAR(date_stat) = 2025;\n\n"
-            f"# Top 5 pays de résidence en 2024 (APF)\n"
-            f"SELECT TOP 5 nationalite AS [Pays de résidence],\n"
-            f"             SUM(mre+tes) AS [Arrivées]\n"
-            f"  FROM [dbo_GOLD].[fact_statistiques_apf]\n"
-            f"  WHERE YEAR(date_stat) = 2024\n"
-            f"  GROUP BY nationalite ORDER BY [Arrivées] DESC;\n\n"
-            f"# Nuitées par type d'hébergement en 2024 (jointure dim)\n"
-            f"SELECT dc.type_eht_libelle AS [Type], SUM(f.nuitees) AS [Nuitées]\n"
-            f"  FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] f\n"
-            f"  JOIN [dbo_GOLD].[gld_dim_categories_classements] dc\n"
-            f"    ON dc.categorie_name = f.categorie_name\n"
-            f"  WHERE YEAR(f.date_stat) = 2024\n"
-            f"  GROUP BY dc.type_eht_libelle ORDER BY [Nuitées] DESC;\n\n"
-            f"# Top 5 régions par nuitées (utilise region_name)\n"
-            f"SELECT TOP 5 region_name AS [Région], SUM(nuitees) AS [Nuitées]\n"
-            f"  FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees]\n"
-            f"  WHERE YEAR(date_stat) = 2024\n"
-            f"  GROUP BY region_name ORDER BY [Nuitées] DESC;\n"
+        )
+
+        sql_rules = (
+            "━━ RÈGLES SQL/SANDBOX ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "1. Utiliser `sql(query)` — JAMAIS `pd.read_sql`, `read_excel`, `read_csv` (bloqués).\n"
+            "2. Préfixer toutes les tables avec [dbo_GOLD].\n"
+            "3. AGRÉGER côté SQL (GROUP BY, SUM, COUNT, TOP N) — jamais ramener millions de lignes.\n"
+            "4. Filtres temporels : `WHERE YEAR(date_stat) = 2025 AND MONTH(date_stat) = 7`.\n"
+            "5. Pré-loaded : pd, np, px, go, to_md(df), MONTH_NAMES_FR.\n"
+            "6. Tableaux : `print(to_md(result))`.\n"
+            "7. Charts (uniquement si demandé) : `fig.write_html('CHART_PATH')`.\n"
+            "8. NOMS DE MOIS : JAMAIS écrire un CASE SQL pour les noms de mois.\n"
+            "   Utiliser Python post-traitement : `df['mois_fr'] = df['mois'].map(MONTH_NAMES_FR)`\n"
+            "   MONTH_NAMES_FR = {1:'Janvier', 2:'Février', ..., 12:'Décembre'} (clés entières 1-12).\n\n"
+        )
+
+        examples = (
+            "━━ EXEMPLES T-SQL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "# Total APF d'une année\n"
+            "SELECT SUM(mre)+SUM(tes) AS total_arrivees\n"
+            "  FROM [dbo_GOLD].[fact_statistiques_apf]\n"
+            "  WHERE YEAR(date_stat) = 2025;\n\n"
+            "# Top 5 pays de résidence en 2024 (APF)\n"
+            "SELECT TOP 5 nationalite AS [Pays de résidence],\n"
+            "             SUM(mre+tes) AS [Arrivées]\n"
+            "  FROM [dbo_GOLD].[fact_statistiques_apf]\n"
+            "  WHERE YEAR(date_stat) = 2024\n"
+            "  GROUP BY nationalite ORDER BY [Arrivées] DESC;\n\n"
+            "# Nuitées par type d'hébergement en 2024 (jointure dim)\n"
+            "SELECT dc.type_eht_libelle AS [Type], SUM(f.nuitees) AS [Nuitées]\n"
+            "  FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] f\n"
+            "  JOIN [dbo_GOLD].[gld_dim_categories_classements] dc\n"
+            "    ON dc.categorie_name = f.categorie_name\n"
+            "  WHERE YEAR(f.date_stat) = 2024\n"
+            "  GROUP BY dc.type_eht_libelle ORDER BY [Nuitées] DESC;\n\n"
+            "# Mois disponibles pour 2026 (TOUJOURS utiliser pour vérifier la couverture)\n"
+            "# APF :\n"
+            "apf_months = sql(\"SELECT DISTINCT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois FROM [dbo_GOLD].[fact_statistiques_apf] WHERE YEAR(date_stat) = 2026 ORDER BY mois\")\n"
+            "apf_months['Mois (FR)'] = apf_months['mois'].map(MONTH_NAMES_FR)  # ← utiliser MONTH_NAMES_FR, JAMAIS CASE SQL\n"
+            "print(to_md(apf_months))\n"
+            "# Hébergement :\n"
+            "eht_months = sql(\"SELECT DISTINCT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE YEAR(date_stat) = 2026 ORDER BY mois\")\n"
+            "eht_months['Mois (FR)'] = eht_months['mois'].map(MONTH_NAMES_FR)\n"
+            "print(to_md(eht_months))\n"
+        )
+
+        return (
+            base_intro
+            + sql_rules
+            + f"━━ SCHÉMAS DÉTAILLÉS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{schemas_text}\n\n"
+            + (f"{values_text}\n\n" if values_text else "")
+            + examples
         )
 
     def _refresh_system_prompt(self) -> None:
@@ -1253,39 +1289,40 @@ RELATIONS ENTRE TABLES (Fabric Lakehouse Gold, schéma [dbo_GOLD]) :
     # Main Chat — Thread-safe
     # ──────────────────────────────────────────────────────────────────────
 
-    def chat(self, user_message: str) -> str:
+    def chat(self, user_message: str, domain_context: Optional[str] = None) -> str:
         """
         Process a data analytics request.
 
+        domain_context: active conversation domain from the orchestrator.
+          "hebergement" → skip APF KPI cache, hint LLM to use hébergement table.
+          "apf"         → normal APF fast-path.
+          None          → unknown, fall through to per-message detection.
+
         Workflow:
-            1. Check if datasets are available
-            2. Optionally gather web context
-            3. Call LLM to generate code
-            4. Execute code in sandbox
-            5. If execution fails, retry with error context
+            1. Check datasets available
+            2. Try KPI cache (skipped if domain_context == "hebergement")
+            3. Optionally gather web context
+            4. Call LLM with domain hint injected
+            5. Execute sandbox code, retry on failure
             6. Format and return results
-
-        Args:
-            user_message: The user's analytics question.
-
-        Returns:
-            Analysis results with optional chart path.
         """
         with self._lock:
-            return self._chat_internal(user_message)
+            return self._chat_internal(user_message, domain_context)
 
-    def _chat_internal(self, user_message: str) -> str:
+    def _chat_internal(self, user_message: str, domain_context: Optional[str] = None) -> str:
         """Internal chat logic (called with self._lock held)."""
 
         if not self.datasets:
             return (
-                f"❌ No dataset loaded. Add Excel/CSV files to {DATA_DIR} "
-                f"or use /load <filename>"
+                "❌ Aucune table Fabric n'est cataloguée. Vérifiez la configuration "
+                "Fabric (endpoint, base, schéma et authentification Azure)."
             )
 
-        # ── Fast-path: try KPI cache before calling LLM ──
+        # ── Fast-path: KPI cache (APF only) ──
+        # domain_context="hebergement" → cache is APF-only, skip it entirely.
+        # Per-message hébergement keywords are also checked inside try_answer().
         if self.kpi_cache:
-            fast_answer = self.kpi_cache.try_answer(user_message)
+            fast_answer = self.kpi_cache.try_answer(user_message, domain_context=domain_context)
             if fast_answer:
                 logger.debug("KPI cache hit for: %s", user_message[:60])
                 return fast_answer
@@ -1303,6 +1340,19 @@ RELATIONS ENTRE TABLES (Fabric Lakehouse Gold, schéma [dbo_GOLD]) :
         # the clean message after the call so it doesn't pollute future turns.
         temporal_constraint = self._build_temporal_constraint(user_message)
         augmented = user_message + temporal_constraint
+
+        # Inject domain hint so the LLM picks the right table on follow-ups
+        # (e.g. "et en 2025" after a hébergement question stays on hébergement).
+        if domain_context == "hebergement":
+            augmented += (
+                "\n\n[DOMAINE ACTIF: hébergement — interroger "
+                "fact_statistiqueshebergementnationaliteestimees (nuitées/arrivées hôtelières).]"
+            )
+        elif domain_context == "apf":
+            augmented += (
+                "\n\n[DOMAINE ACTIF: APF — interroger fact_statistiques_apf (MRE/TES/arrivées frontières).]"
+            )
+
         if web_context:
             augmented = f"{augmented}\n\n---\n{web_context}"
 
@@ -1441,7 +1491,7 @@ RELATIONS ENTRE TABLES (Fabric Lakehouse Gold, schéma [dbo_GOLD]) :
     def list_datasets(self) -> str:
         """List all loaded datasets."""
         if not self.datasets:
-            return f"❌ No datasets. Add files to {DATA_DIR}"
+            return "❌ Aucune table Fabric cataloguée."
 
         lines = ["📁 DATASETS", "=" * 50]
         for name, info in self.datasets.items():

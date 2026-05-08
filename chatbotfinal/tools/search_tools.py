@@ -50,13 +50,78 @@ logger = get_logger("statour.search")
 try:
     from tavily import TavilyClient
 except ImportError:
-    logger.error(
-        "tavily package not installed. Run: pip install tavily-python"
+    TavilyClient = None
+    logger.warning(
+        "tavily package not installed — Tavily backend disabled. "
+        "Install tavily-python or use SEARCH_BACKEND=brave with BRAVE_API_KEY."
     )
-    raise
 
 # requests is a transitive dep of openai/tavily/chromadb, always available
 import requests
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool Schemas — native function calling with Azure OpenAI (gpt-5-mini)
+# ══════════════════════════════════════════════════════════════════════════════
+# The LLM decides autonomously when to call these tools and generates optimal queries.
+
+SEARCH_TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Recherche factuelle et actualités sur le web via Tavily. "
+                "Utiliser pour : actualités récentes tourisme Maroc, statistiques officielles publiées, "
+                "événements récents (CAN, conférences, salons), données Office des Changes, ONMT, HCP. "
+                "NE PAS utiliser pour des analyses causales ou des 'pourquoi'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Requête de recherche concise et précise (3-8 mots)",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 3,
+                        "description": "Nombre de résultats souhaités (1-5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "semantic_search",
+            "description": (
+                "Recherche sémantique et contextuelle via Exa.ai. "
+                "Utiliser pour : expliquer des tendances, analyser des facteurs causaux, "
+                "questions 'pourquoi', contexte géopolitique/économique, comparaisons internationales, "
+                "recherches multi-sources sur des sujets complexes. "
+                "Meilleur que web_search pour les questions d'analyse et de compréhension."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Requête de recherche sémantique (peut être plus longue et naturelle)",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 3,
+                        "description": "Nombre de résultats souhaités (1-5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -219,6 +284,8 @@ class TourismSearchTool:
         self._backend = SEARCH_BACKEND if SEARCH_BACKEND in {"tavily", "brave", "auto"} else "auto"
         self._brave_available = bool(BRAVE_API_KEY)
         self.client = None  # Tavily client, None when running in pure Brave mode
+        self._exa = None
+        self._exa_available = False
 
         if self._backend == "brave":
             if not self._brave_available:
@@ -239,6 +306,14 @@ class TourismSearchTool:
                 "Get your key at https://tavily.com"
             )
 
+        if TavilyClient is None:
+            if self._backend == "auto" and self._brave_available:
+                logger.info("Search backend: Brave (auto mode, Tavily package missing)")
+                return
+            raise SearchConfigError(
+                "tavily-python is not installed but Tavily backend is required."
+            )
+
         try:
             self.client = TavilyClient(api_key=TAVILY_API_KEY)
         except Exception as e:
@@ -248,6 +323,22 @@ class TourismSearchTool:
             logger.info("Search backend: Brave-first → Tavily fallback")
         else:
             logger.info("Search backend: Tavily")
+
+        # Exa.ai — semantic search (optional, graceful fallback if not configured)
+        from config.settings import EXA_API_KEY
+        if EXA_API_KEY:
+            try:
+                self._exa = ExaSearchTool()
+                self._exa_available = True
+                logger.info("Exa.ai semantic search: available")
+            except Exception as e:
+                self._exa = None
+                self._exa_available = False
+                logger.warning("Exa.ai unavailable (non-critical): %s", e)
+        else:
+            self._exa = None
+            self._exa_available = False
+            logger.info("Exa.ai: EXA_API_KEY not set — semantic search disabled")
 
     # ──────────────────────────────────────────────────────────────────────
     # Core Search (with retry and fallback)
@@ -565,6 +656,56 @@ class TourismSearchTool:
             topic="general",
         )
 
+    def smart_search(
+        self,
+        query: str,
+        analysis_type: str = "factual",
+        max_results: int = 5,
+    ) -> List[Dict]:
+        """
+        Intelligently route search to the best backend based on query type.
+
+        Routing logic:
+        - "causal" | "comparative" | "trend" | "forecasting" → Exa.ai first (semantic), fallback Tavily
+        - "factual" | "news" | anything else → Tavily first, fallback Brave
+
+        Args:
+            query: Search query string.
+            analysis_type: Type of analysis — "causal", "comparative", "trend", "factual", "news".
+            max_results: Number of results to return.
+
+        Returns:
+            List of result dicts (title, url, content, score). Never raises.
+        """
+        SEMANTIC_TYPES = {"causal", "comparative", "trend", "forecasting"}
+
+        if analysis_type in SEMANTIC_TYPES and self._exa_available:
+            results = self._exa.search(query, max_results=max_results)
+            if results:
+                logger.debug(
+                    "smart_search [Exa/%s]: %d results for '%s'",
+                    analysis_type, len(results), query[:50]
+                )
+                return results
+            logger.debug(
+                "smart_search [Exa→Tavily fallback/%s]: Exa empty for '%s'",
+                analysis_type, query[:50]
+            )
+
+        results = self.search(
+            query=query,
+            max_results=max_results,
+            search_depth="basic",
+            use_trusted_only=True,
+            topic="news" if analysis_type == "news" else "general",
+        )
+        if results:
+            logger.debug(
+                "smart_search [Tavily/%s]: %d results for '%s'",
+                analysis_type, len(results), query[:50]
+            )
+        return results
+
     # ──────────────────────────────────────────────────────────────────────
     # Formatted Output for LLM Context
     # ──────────────────────────────────────────────────────────────────────
@@ -720,6 +861,79 @@ class TourismSearchTool:
     def get_domain_count() -> int:
         """Return total number of trusted domains."""
         return len(ALL_TRUSTED_DOMAINS)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Exa.ai Semantic Search Tool
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ExaSearchTool:
+    """
+    Semantic search via Exa.ai — optimized for causal and research queries.
+
+    Best for: "pourquoi", context analysis, trend explanation, multi-hop research.
+    Uses neural/semantic search (embedding-based) rather than keyword matching.
+
+    Falls back gracefully when EXA_API_KEY is not set (returns empty list, no exception).
+    """
+
+    def __init__(self):
+        from config.settings import EXA_API_KEY
+        if not EXA_API_KEY:
+            raise ValueError(
+                "EXA_API_KEY not configured — add it to .env "
+                "(get free key at https://exa.ai)"
+            )
+        try:
+            from exa_py import Exa
+            self._client = Exa(api_key=EXA_API_KEY)
+            logger.info("Exa.ai search initialized")
+        except ImportError:
+            raise ImportError(
+                "exa-py package not installed. Run: pip install exa-py"
+            )
+
+    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+        """
+        Semantic search using Exa.ai neural index.
+
+        Args:
+            query: Natural language search query.
+            max_results: Number of results (1-10).
+
+        Returns:
+            List of dicts with keys: title, url, content, score.
+            Returns empty list on any failure (never raises).
+        """
+        try:
+            results = self._client.search_and_contents(
+                query,
+                num_results=min(max(max_results, 1), 10),
+                highlights={
+                    "num_sentences": 3,
+                    "highlights_per_url": 2,
+                },
+            )
+            output = []
+            for r in results.results:
+                if not r.url:
+                    continue
+                content = ""
+                if hasattr(r, "highlights") and r.highlights:
+                    content = " ".join(r.highlights)
+                elif hasattr(r, "text") and r.text:
+                    content = r.text[:500]
+                output.append({
+                    "title": r.title or "",
+                    "url": r.url,
+                    "content": content,
+                    "score": 1.0,  # Exa doesn't return relevance scores
+                })
+            logger.debug("Exa search: %d results for '%s'", len(output), query[:50])
+            return output
+        except Exception as e:
+            logger.warning("Exa search failed for '%s': %s", query[:50], str(e)[:120])
+            return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════

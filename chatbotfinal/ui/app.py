@@ -111,8 +111,11 @@ def process_message(user_input: str):
         return
 
     # Ensure we have an active conversation
-    if session_mgr.get_active_conversation() is None:
-        session_mgr.new_conversation()
+    conv = session_mgr.get_active_conversation()
+    if conv is None:
+        conv = session_mgr.new_conversation()
+    else:
+        orchestrator.load_conversation_state(conv.id, conv.messages)
 
     # Add user message
     user_msg = Message(role="user", content=user_input)
@@ -120,10 +123,10 @@ def process_message(user_input: str):
 
     # Process through orchestrator
     try:
-        result = orchestrator.route(user_input)
+        result = orchestrator.route(user_input, conversation_id=conv.id)
 
         # Extract chart path from response
-        chart_path = extract_chart_path(result["response"])
+        chart_path = result.get("chart_path") or extract_chart_path(result["response"])
 
         # Create assistant message
         assistant_msg = Message(

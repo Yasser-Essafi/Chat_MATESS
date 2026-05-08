@@ -243,6 +243,7 @@ class NormalAgent(BaseAgent):
         # ── Step 1: Quick response (no LLM needed) ──
         quick = self._get_quick_response(user_message)
         if quick:
+            self._trim_history()
             self._append_exchange(user_message, quick)
             logger.debug("Quick response for: %s", user_message[:50])
             return quick

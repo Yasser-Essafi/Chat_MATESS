@@ -30,6 +30,7 @@ import sys
 import time
 import re
 import threading
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,6 +44,8 @@ from config.settings import (
     MODEL_IS_REASONING,
     AGENT_NAMES,
     ACTIVE_AGENTS,
+    ORCHESTRATOR_RECENT_EXCHANGES,
+    ORCHESTRATOR_SUMMARY_MAX_TOKENS,
 )
 from utils.base_agent import (
     get_shared_client,
@@ -61,41 +64,42 @@ logger = get_logger("statour.orchestrator")
 # {min_year}, {max_year}, {last_agent}, {conversation_context} are replaced
 # at runtime with actual values.
 
-CLASSIFIER_SYSTEM_PROMPT = """Tu es le cerveau de routage de STATOUR, la plateforme du Ministère du Tourisme du Maroc. Tu dois comprendre L'INTENTION de l'utilisateur — même si le message contient des fautes, de l'argot, du mélange de langues (français/anglais/arabe/darija), ou est très court.
+CLASSIFIER_SYSTEM_PROMPT = """Tu es le routeur de STATOUR (Ministère du Tourisme Maroc).
+Analyse l'INTENTION de l'utilisateur et route vers le bon agent.
 
-Tu as 4 agents:
+TES 4 AGENTS :
 
-ANALYTICS — Analyse les données du dataset interne. Deux domaines de données :
-(1) APF (arrivées aux postes frontières) : arrivées touristes, MRE, TES, postes frontières, voies d'entrée, pays de résidence, continents.
-(2) Hébergement STDN/EHTC : nuitées, arrivées hôtelières, hébergement, hôtels, établissements, délégations, régions hôtelières, types d'hébergement, capacité.
-Le dataset couvre {min_year}–{max_year} UNIQUEMENT. Questions sur des chiffres, statistiques, graphiques, tendances, classements, top N, comparaisons dans cette période → ANALYTICS. Commandes / → ANALYTICS.
+ANALYTICS — Analyse données Fabric Lakehouse Gold :
+  • APF (postes frontières) : arrivées, MRE, TES, voies, nationalités, continents → {apf_min_year}–{apf_max_year}
+  • HÉBERGEMENT (EHTC) : nuitées, arrivées hôtelières, taux occupation, délégations → {hbg_min_year}–{hbg_max_year}
+  → Questions avec chiffres/stats/graphiques dans ces plages → ANALYTICS
 
-RESEARCHER — Recherche sur internet (Tavily) + base documentaire (RAG). Actualités, stratégie, Vision 2030, contexte externe, données historiques HORS {min_year}–{max_year}, explications politiques/économiques, benchmarks internationaux, news, recommandations → RESEARCHER. Aussi quand l'utilisateur demande EXPLICITEMENT de chercher/search/googler → RESEARCHER.
+RESEARCHER — Recherche web + RAG :
+  → Actualités, contexte, Vision 2030, facteurs externes, "pourquoi", données hors plages
+  → Si l'utilisateur veut EXPLIQUER des données déjà calculées (pourquoi hausse/baisse) → RESEARCHER
+  → Stratégie, benchmarks internationaux, news → RESEARCHER
 
-PREDICTION — Prévisions et estimations de flux touristiques FUTURS. Questions sur des années FUTURES (2027, 2028…), estimations, projections, scénarios (optimiste/pessimiste/de base), forecasts → PREDICTION.
+PREDICTION — Prévisions futures :
+  → Années futures (2027+), estimations, scénarios, forecasts → PREDICTION
 
-NORMAL — Salutations, aide, questions sur la plateforme STATOUR elle-même, conversation générale, météo, heure, qui es-tu → NORMAL.
+NORMAL — Conversation générale :
+  → Salutations, aide, questions sur STATOUR, conversation → NORMAL
 
-CONTEXTE DE CONVERSATION:
+RÈGLES STRICTES :
+1. Commandes / → ANALYTICS
+2. "cherche/search/google/internet" explicite → RESEARCHER
+3. Données dans plage APF ({apf_min_year}–{apf_max_year}) ou HÉBERGEMENT ({hbg_min_year}–{hbg_max_year}) → ANALYTICS
+4. Données hors plages → RESEARCHER
+5. Années 2027+ ou "estimer/prévoir" → PREDICTION
+6. "pourquoi X a augmenté/baissé" sur données déjà calculées → RESEARCHER
+7. Salutations/aide → NORMAL
+8. Follow-up court sur même sujet → MÊME agent: {last_agent}
+9. Doute → {last_agent} si existant, sinon ANALYTICS
+
+CONTEXTE CONVERSATION :
 {conversation_context}
 
-REGLES STRICTES:
-1. Commandes / → TOUJOURS ANALYTICS
-2. Demande EXPLICITE de chercher/search/google/internet/tavily → TOUJOURS RESEARCHER
-3. Prévision/estimation/projection/forecast pour années FUTURES ou mots "estimer", "prévoir" → PREDICTION
-4. Années HORS {min_year}–{max_year} (sauf futur) → RESEARCHER
-5. Données/chiffres/stats pour {min_year}–{max_year} (arrivées, MRE, TES, pays de résidence, régions, frontières, voies) → ANALYTICS
-6. Actualités/stratégie/contexte/pourquoi/news/benchmarks → RESEARCHER
-7. Salutations/aide/conversation → NORMAL
-8. GRAPHIQUE/CHART/VISUALISATION:
-   - Données INTERNES (arrivées Maroc, pays de résidence, régions, voies, {min_year}–{max_year}) → ANALYTICS
-   - Données EXTERNES (autres pays, monde, tendances globales, hors dataset) → RESEARCHER (pipeline automatique)
-   - FOLLOW-UP chart sur réponse ANALYTICS précédente → ANALYTICS
-   - FOLLOW-UP chart sur réponse RESEARCHER précédente → RESEARCHER (pipeline automatique)
-9. FOLLOW-UP court (continuation du même sujet) → MÊME agent: {last_agent}
-10. Doute → {last_agent} si existe, sinon ANALYTICS
-
-UN SEUL MOT: ANALYTICS ou RESEARCHER ou PREDICTION ou NORMAL"""
+UN SEUL MOT : ANALYTICS ou RESEARCHER ou PREDICTION ou NORMAL"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -127,6 +131,48 @@ _CODE_FAILURE_INDICATORS = [
     "keyerror", "key error", "column not found", "colonne introuvable",
     "nameerror", "name error", "syntaxerror",
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Domain Detection Constants
+# ══════════════════════════════════════════════════════════════════════════════
+# Used to track which data table the conversation is currently about so that
+# follow-ups like "et en 2025" stay in the right domain (hébergement vs APF).
+
+_APF_DOMAIN_KW = [
+    "mre", "tes", "frontière", "frontieres", "poste frontière", "postes frontières",
+    "apf", "voie aérienne", "voie maritime", "voie terrestre",
+    "arrivées aux postes", "marocains résidant", "diaspora",
+    "séjournistes", "sejournistes",
+]
+_HEBERGEMENT_DOMAIN_KW = [
+    "nuitée", "nuitee", "nuitées", "nuitees",
+    "hébergement", "hebergement",
+    "hôtel", "hotel",
+    "ehtc", "stdn",
+    "taux d'occupation", "taux occupation",
+    "chambre", "capacité chambre",
+    "maison d'hôte", "riad", "camping",
+    "délégation", "delegation",
+    "arrivées hôtelières", "arrivees hotelières",
+    "établissement classé", "etablissement classe",
+]
+
+
+def _detect_domain(text: str) -> Optional[str]:
+    """
+    Infer domain from combined user+assistant text (0ms, no LLM).
+    Returns "hebergement", "apf", or None when ambiguous.
+    Scoring: whichever domain has more keyword hits wins; ties → None.
+    """
+    t = text.lower()
+    h_score = sum(1 for kw in _HEBERGEMENT_DOMAIN_KW if kw in t)
+    a_score = sum(1 for kw in _APF_DOMAIN_KW if kw in t)
+    if h_score > a_score:
+        return "hebergement"
+    if a_score > h_score:
+        return "apf"
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -243,6 +289,25 @@ _PREDICTION_KEYWORDS = [
 ]
 
 
+@dataclass
+class ConversationRuntimeState:
+    """Per-conversation state kept outside persisted chat-history JSON.
+
+    The frontend already persists display messages. This runtime state stores
+    only the operational memory needed by the router and agents: active domain,
+    last agent, compact routing context and per-agent folded histories.
+    """
+
+    conversation_id: str
+    last_agent: Optional[str] = None
+    message_count: int = 0
+    routing_history: List[Tuple[str, str, bool]] = field(default_factory=list)
+    conversation_log: List[Tuple[str, str]] = field(default_factory=list)
+    active_domain: Optional[str] = None
+    session_summary: str = ""
+    agent_states: Dict[str, Dict] = field(default_factory=dict)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ══════════════════════════════════════════════════════════════════════════════
@@ -286,7 +351,7 @@ class Orchestrator:
         self.deployment = AZURE_OPENAI_DEPLOYMENT
 
         # ── Thread safety ──
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # ── Classification cache ──
         self._classify_cache = SearchCache(max_size=100, ttl_seconds=300)
@@ -330,6 +395,10 @@ class Orchestrator:
         self.message_count: int = 0
         self.routing_history: List[Tuple[str, str, bool]] = []
         self.conversation_log: List[Tuple[str, str]] = []
+        # Active domain tracked across turns for follow-up context propagation.
+        # "hebergement" | "apf" | None (unknown/mixed)
+        self._active_domain: Optional[str] = None
+        self._runtime_states: Dict[str, ConversationRuntimeState] = {}
 
         # ── Session summary (ConversationSummaryBuffer for the classifier) ──
         # Compresses old exchanges so the routing LLM always gets compact context.
@@ -339,12 +408,19 @@ class Orchestrator:
         # ── Dataset year range ──
         self.min_year, self.max_year = self._get_dataset_year_range()
 
+        # Year ranges for both tables
+        self.year_ranges = self._get_all_year_ranges()
+        self.apf_min_year = self.year_ranges["apf"][0]
+        self.apf_max_year = self.year_ranges["apf"][1]
+        self.hbg_min_year = self.year_ranges["hebergement"][0]
+        self.hbg_max_year = self.year_ranges["hebergement"][1]
+
         # ── Ready ──
         print("-" * 60)
         print("✅ Tous les agents sont opérationnels.")
         print(f"   📊 Datasets: {len(self.analytics_agent.datasets)}")
-        if self.min_year and self.max_year:
-            print(f"   📅 Plage données: {self.min_year} → {self.max_year}")
+        print(f"   📅 APF: {self.apf_min_year}–{self.apf_max_year}")
+        print(f"   🏨 Hébergement: {self.hbg_min_year}–{self.hbg_max_year}")
         print("   📚 RAG + 🌐 Web: prêts")
         print(f"   🔮 Prévisionniste: {'prêt' if self.prediction_agent else 'indisponible'}")
         print("-" * 60)
@@ -361,6 +437,168 @@ class Orchestrator:
     # ══════════════════════════════════════════════════════════════════════
     # HELPERS
     # ══════════════════════════════════════════════════════════════════════
+
+    def _new_runtime_state(self, conversation_id: Optional[str]) -> ConversationRuntimeState:
+        return ConversationRuntimeState(conversation_id=conversation_id or "_default")
+
+    @staticmethod
+    def _msg_get(message, key: str, default=None):
+        if isinstance(message, dict):
+            return message.get(key, default)
+        return getattr(message, key, default)
+
+    def _build_runtime_state_from_messages(
+        self,
+        conversation_id: str,
+        messages: Optional[List] = None,
+    ) -> ConversationRuntimeState:
+        """Rehydrate routing and agent context from persisted UI messages."""
+        state = self._new_runtime_state(conversation_id)
+        messages = messages or []
+
+        agent_prompts = {
+            "normal": self.normal_agent.system_prompt,
+            "researcher": self.researcher_agent.system_prompt,
+            "analytics": self.analytics_agent.system_prompt,
+        }
+        agent_histories = {
+            key: [{"role": "system", "content": prompt}]
+            for key, prompt in agent_prompts.items()
+        }
+
+        last_user: Optional[str] = None
+        domain_text_parts: List[str] = []
+
+        for msg in messages:
+            role = self._msg_get(msg, "role")
+            content = self._msg_get(msg, "content", "") or ""
+            if not content:
+                continue
+
+            if role == "user":
+                last_user = content
+                state.message_count += 1
+                state.conversation_log.append(("user", content[:500]))
+                domain_text_parts.append(content[:600])
+                continue
+
+            if role == "assistant":
+                agent = self._msg_get(msg, "agent") or "normal"
+                state.last_agent = agent if agent in {"normal", "researcher", "analytics", "prediction"} else "normal"
+                state.conversation_log.append((state.last_agent, content[:500]))
+                domain_text_parts.append(content[:600])
+
+                if state.last_agent in agent_histories and last_user:
+                    agent_histories[state.last_agent].append({"role": "user", "content": last_user})
+                    agent_histories[state.last_agent].append({"role": "assistant", "content": content})
+
+        if len(state.conversation_log) > 30:
+            state.conversation_log = state.conversation_log[-30:]
+
+        detected = _detect_domain(" ".join(domain_text_parts[-8:]))
+        state.active_domain = detected
+        state.agent_states = {
+            key: {"conversation_history": history, "history_summary": ""}
+            for key, history in agent_histories.items()
+        }
+        return state
+
+    def load_conversation_state(
+        self,
+        conversation_id: Optional[str],
+        messages: Optional[List] = None,
+        force: bool = False,
+    ) -> None:
+        """Ensure runtime memory exists for a conversation.
+
+        Called by the Flask conversation activation endpoint. It preserves an
+        existing runtime state unless force=True, so switching conversations
+        no longer erases follow-up context.
+        """
+        cid = conversation_id or "_default"
+        with self._lock:
+            if force or cid not in self._runtime_states:
+                self._runtime_states[cid] = self._build_runtime_state_from_messages(cid, messages)
+
+    def reset_conversation_state(self, conversation_id: Optional[str] = None) -> None:
+        """Reset one conversation runtime state, or the default/global state."""
+        cid = conversation_id or "_default"
+        with self._lock:
+            self._runtime_states[cid] = self._new_runtime_state(cid)
+            if cid == "_default":
+                self.last_agent = None
+                self._active_domain = None
+                self.conversation_log.clear()
+                self.routing_history.clear()
+                self.message_count = 0
+                self._session_summary = ""
+                self._classify_cache.clear()
+
+    def clear_runtime_states(self) -> None:
+        with self._lock:
+            self._runtime_states.clear()
+            self.reset_conversation_state("_default")
+
+    def _load_runtime_attrs(self, state: ConversationRuntimeState) -> None:
+        self.last_agent = state.last_agent
+        self.message_count = state.message_count
+        self.routing_history = list(state.routing_history)
+        self.conversation_log = list(state.conversation_log)
+        self._active_domain = state.active_domain
+        self._session_summary = state.session_summary
+
+    def _save_runtime_attrs(self, state: ConversationRuntimeState) -> None:
+        state.last_agent = self.last_agent
+        state.message_count = self.message_count
+        state.routing_history = list(self.routing_history[-100:])
+        state.conversation_log = list(self.conversation_log[-30:])
+        state.active_domain = self._active_domain
+        state.session_summary = self._session_summary
+
+    def _compact_runtime_log(self) -> None:
+        """Fold old router context into a compact summary."""
+        keep = max(4, ORCHESTRATOR_RECENT_EXCHANGES * 2)
+        if len(self.conversation_log) <= keep + 4:
+            return
+
+        to_compact = self.conversation_log[:-keep]
+        recent = self.conversation_log[-keep:]
+        lines = []
+        for role, text in to_compact:
+            clean = re.sub(r"```[\s\S]*?```", "[code]", text or "")
+            lines.append(f"{role}: {clean[:350]}")
+
+        prior = f"\nRésumé précédent:\n{self._session_summary}\n" if self._session_summary else ""
+        prompt = (
+            "Résume pour un routeur multi-agent STATOUR les échanges anciens ci-dessous.\n"
+            "Garde uniquement les éléments utiles aux follow-ups: domaine actif, période, métrique, "
+            "pays/région/voie/poste, dernières demandes, résultats clés, graphiques et questions ouvertes. "
+            "Mentionne explicitement si le contexte concerne APF ou hébergement.\n"
+            f"{prior}\nÉchanges anciens:\n" + "\n".join(lines) +
+            "\n\nRésumé routeur en français, max 160 mots:"
+        )
+
+        try:
+            kwargs = {
+                "model": self.deployment,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_completion_tokens": ORCHESTRATOR_SUMMARY_MAX_TOKENS,
+            }
+            response = self.client.chat.completions.create(**kwargs)
+            if response.choices and response.choices[0].message.content:
+                self._session_summary = response.choices[0].message.content.strip()
+            else:
+                raise RuntimeError("empty summary")
+        except Exception as e:
+            logger.debug("Router context compaction failed: %s", e)
+            fallback = " | ".join(
+                text[:120].replace("\n", " ")
+                for role, text in to_compact
+                if role == "user"
+            )
+            self._session_summary = (self._session_summary + " | " + fallback).strip(" |")[:1600]
+
+        self.conversation_log = recent
 
     def _get_dataset_year_range(self) -> Tuple[Optional[int], Optional[int]]:
         """Extract min/max year — first from KPI cache (cheap), then from
@@ -383,6 +621,33 @@ class Orchestrator:
             logger.debug("Could not determine year range from _apf_df: %s", e)
         return None, None
 
+    def _get_all_year_ranges(self) -> dict:
+        """
+        Extract year ranges for both fact tables from catalog metadata.
+        Returns dict: {"apf": (min, max), "hebergement": (min, max)}
+        """
+        ranges = {"apf": (self.min_year, self.max_year), "hebergement": (None, None)}
+
+        hbg_table = "fact_statistiqueshebergementnationaliteestimees"
+        if hbg_table in self.analytics_agent.datasets:
+            try:
+                cols = self.analytics_agent.datasets[hbg_table].get("columns", [])
+                date_col = next(
+                    (c for c in cols if "date" in c["name"].lower()),
+                    None
+                )
+                if date_col and "min" in date_col and "max" in date_col:
+                    min_hbg = int(str(date_col["min"])[:4]) if date_col["min"] else None
+                    max_hbg = int(str(date_col["max"])[:4]) if date_col["max"] else None
+                    ranges["hebergement"] = (min_hbg, max_hbg)
+                    logger.info(
+                        "Hébergement year range: %s–%s", min_hbg, max_hbg
+                    )
+            except Exception as e:
+                logger.debug("Could not extract hébergement year range: %s", e)
+
+        return ranges
+
     def _years_in_message(self, message: str) -> List[int]:
         """Extract 4-digit years (1900-2099) from the message."""
         return [int(y) for y in re.findall(r"\b(19\d{2}|20\d{2})\b", message)]
@@ -394,17 +659,21 @@ class Orchestrator:
         return all(y < self.min_year or y > self.max_year for y in years)
 
     def _build_conversation_context(self) -> str:
-        """Build compact context for the LLM classifier — last 3 exchanges only."""
+        """Build compact context for the LLM classifier."""
         if not self.conversation_log:
             return "Premier message — pas d'historique."
 
-        recent = self.conversation_log[-6:]  # last 3 exchanges
+        recent = self.conversation_log[-max(4, ORCHESTRATOR_RECENT_EXCHANGES * 2):]
         lines = []
+        if self._session_summary:
+            lines.append(f"Résumé ancien: {self._session_summary[:1200]}")
+        if self._active_domain:
+            lines.append(f"Domaine actif: {self._active_domain}")
         for role, text in recent:
-            short = text[:150].replace("\n", " ")
+            short = text[:350].replace("\n", " ")
             prefix = "USER" if role == "user" else role.upper()
             lines.append(f"  {prefix}: {short}")
-        return "Échanges récents:\n" + "\n".join(lines)
+        return "Mémoire conversationnelle:\n" + "\n".join(lines)
 
     # ══════════════════════════════════════════════════════════════════════
     # LAYER 1 — INSTANT RULES (zero latency, 100% reliable)
@@ -507,14 +776,17 @@ class Orchestrator:
         # ── Build classifier prompt ──
         min_y = self.min_year or "?"
         max_y = self.max_year or "?"
-        last = self.last_agent or "AUCUN (premier message)"
         context = self._build_conversation_context()
 
         prompt = (
             CLASSIFIER_SYSTEM_PROMPT
-            .replace("{min_year}", str(min_y))
-            .replace("{max_year}", str(max_y))
-            .replace("{last_agent}", str(last).upper())
+            .replace("{min_year}", str(min_y))                                          # backward compat
+            .replace("{max_year}", str(max_y))                                          # backward compat
+            .replace("{apf_min_year}", str(self.apf_min_year or self.min_year or "?"))
+            .replace("{apf_max_year}", str(self.apf_max_year or self.max_year or "?"))
+            .replace("{hbg_min_year}", str(self.hbg_min_year or "?"))
+            .replace("{hbg_max_year}", str(self.hbg_max_year or "?"))
+            .replace("{last_agent}", str(self.last_agent or "AUCUN").upper())
             .replace("{conversation_context}", context)
         )
 
@@ -745,83 +1017,6 @@ class Orchestrator:
         return fallback
 
     # ══════════════════════════════════════════════════════════════════════
-    # AUTO-ENRICHMENT (Analytics response + external tourism factors)
-    # ══════════════════════════════════════════════════════════════════════
-
-    _ENRICHMENT_TRIGGER_WORDS = (
-        "pourquoi", "why", "cause", "raison", "expliqu", "facteur",
-        "contexte", "impact", "influence", "baisse", "hausse", "évolution",
-        "comparaison", "vs", "versus", "flux", "tendance",
-    )
-
-    _ENRICHMENT_MONTHS = (
-        "janvier", "février", "fevrier", "mars", "avril", "mai", "juin",
-        "juillet", "août", "aout", "septembre", "octobre", "novembre",
-        "décembre", "decembre",
-    )
-
-    def _should_enrich_with_context(self, message: str, response: str) -> bool:
-        """Decide whether an analytics answer should be enriched with external factors.
-
-        True if: the user asked "why/context/..." OR the response is a
-        quantitative answer scoped to a specific period.
-        """
-        msg_lower = message.lower()
-
-        if any(w in msg_lower for w in self._ENRICHMENT_TRIGGER_WORDS):
-            return True
-
-        has_numbers = bool(re.search(r'\*\*[\d,]+\*\*', response))
-        has_year = bool(re.search(r'\b20[12]\d\b', msg_lower))
-        has_month = any(m in msg_lower for m in self._ENRICHMENT_MONTHS)
-        return has_numbers and (has_year or has_month)
-
-    def _build_external_search_query(self, message: str) -> str:
-        """Build a Tavily query targeting external tourism factors for the period."""
-        msg_lower = message.lower()
-
-        year_match = re.search(r'\b(20[12]\d)\b', message)
-        year = year_match.group(1) if year_match else str(self.max_year or "")
-
-        month = next((m for m in self._ENRICHMENT_MONTHS if m in msg_lower), None)
-        period = f"{month} {year}".strip() if month else year
-
-        return (
-            f"tourisme maroc {period} arrivées facteurs économiques "
-            f"vols conjoncture"
-        ).strip()
-
-    def _get_external_factors(self, message: str) -> str:
-        """Search Tavily for context factors and return a formatted appendix.
-
-        Returns empty string on any failure — enrichment must never break
-        the main analytics response.
-        """
-        try:
-            searcher = getattr(self.researcher_agent, "searcher", None)
-            if not searcher:
-                return ""
-
-            query = self._build_external_search_query(message)
-            logger.info("External factors search: %s", query)
-
-            results = searcher.search(query, max_results=3)
-            if not results:
-                return ""
-
-            lines = ["\n\n---\n### 🌐 Facteurs externes (contexte de la période)\n"]
-            for r in results[:3]:
-                title = r.get("title", "")
-                content = (r.get("content") or "")[:200]
-                url = r.get("url", "")
-                if title and content:
-                    lines.append(f"**{title}**\n{content}...\n*({url})*\n")
-
-            return "\n".join(lines) if len(lines) > 1 else ""
-        except Exception as e:
-            logger.debug("External factors search failed (non-critical): %s", e)
-            return ""
-
     # ══════════════════════════════════════════════════════════════════════
     # AUTO-REROUTE (Analytics → Researcher when data unavailable)
     # ══════════════════════════════════════════════════════════════════════
@@ -836,11 +1031,38 @@ class Orchestrator:
             return False  # code crash ≠ missing data — never reroute
         return any(ind in resp_lower for ind in NO_DATA_INDICATORS)
 
+    def _run_base_agent(
+        self,
+        runtime_state: Optional[ConversationRuntimeState],
+        agent_key: str,
+        call,
+    ):
+        """Run a BaseAgent subclass with per-conversation memory loaded."""
+        agent = {
+            "normal": self.normal_agent,
+            "researcher": self.researcher_agent,
+            "analytics": self.analytics_agent,
+        }.get(agent_key)
+        if agent is None or not hasattr(agent, "export_context_state"):
+            return call()
+
+        with agent._lock:
+            if runtime_state is None:
+                return call()
+            previous_state = agent.export_context_state()
+            agent.import_context_state(runtime_state.agent_states.get(agent_key))
+            try:
+                result = call()
+                runtime_state.agent_states[agent_key] = agent.export_context_state()
+                return result
+            finally:
+                agent.import_context_state(previous_state)
+
     # ══════════════════════════════════════════════════════════════════════
     # ROUTE & EXECUTE — Thread-safe
     # ══════════════════════════════════════════════════════════════════════
 
-    def route(self, user_message: str) -> Dict:
+    def route(self, user_message: str, conversation_id: Optional[str] = None) -> Dict:
         """
         Classify, route, and execute a user message.
 
@@ -857,9 +1079,23 @@ class Orchestrator:
                 - classification_time_ms (float): Time for classification
                 - total_time_ms (float): Total processing time
         """
-        return self._route_internal(user_message)
+        cid = conversation_id or "_default"
+        with self._lock:
+            state = self._runtime_states.get(cid)
+            if state is None:
+                state = self._new_runtime_state(cid)
+                self._runtime_states[cid] = state
+            self._load_runtime_attrs(state)
+            result = self._route_internal(user_message, runtime_state=state)
+            self._compact_runtime_log()
+            self._save_runtime_attrs(state)
+            return result
 
-    def _route_internal(self, user_message: str) -> Dict:
+    def _route_internal(
+        self,
+        user_message: str,
+        runtime_state: Optional[ConversationRuntimeState] = None,
+    ) -> Dict:
         """Internal routing logic."""
 
         self.message_count += 1
@@ -875,6 +1111,7 @@ class Orchestrator:
 
         response = ""
         rerouted = False
+        chart_path = None
 
         # ── Detect chart/visualization request ──
         _CHART_KW = ["chart", "graphe", "graphique", "visualis", "courbe",
@@ -899,32 +1136,35 @@ class Orchestrator:
                             f"{ctx}]"
                         )
 
-                response = self.analytics_agent.chat(actual_message)
+                response = self._run_base_agent(
+                    runtime_state,
+                    "analytics",
+                    lambda: self.analytics_agent._chat_internal(
+                        actual_message, domain_context=self._active_domain
+                    ),
+                )
 
                 # Auto-reroute to researcher if analytics found no data in the dataset.
                 # EXCEPTION: chart requests never reroute — researcher cannot render charts.
                 # Analytics must produce the chart even with partial/limited data.
                 if self._should_reroute_to_researcher(response) and not is_chart_request:
                     logger.info("Auto-rerouting to researcher (no data in dataset)")
-                    response = self.researcher_agent.chat(user_message)
+                    response = self._run_base_agent(
+                        runtime_state,
+                        "researcher",
+                        lambda: self.researcher_agent._chat_internal(user_message),
+                    )
                     rerouted = True
                     agent_key = "researcher"
                     agent_icon = "🔍"
                     agent_name = "Chercheur Tourisme"
-                else:
-                    # Auto-enrich quantitative analytics answers with external
-                    # tourism context (flights, conjuncture, events) — skip for
-                    # charts since the visual already carries the story.
-                    if (
-                        not is_chart_request
-                        and self._should_enrich_with_context(user_message, response)
-                    ):
-                        external = self._get_external_factors(user_message)
-                        if external:
-                            response = response + external
 
             elif agent_key == "researcher":
-                response = self.researcher_agent.chat(user_message)
+                response = self._run_base_agent(
+                    runtime_state,
+                    "researcher",
+                    lambda: self.researcher_agent._chat_internal(user_message),
+                )
 
                 # Two-phase pipeline: researcher gathers external data → analytics renders chart.
                 # This handles "chart des tendances mondiales", "chart Maroc vs Espagne", etc.
@@ -941,7 +1181,13 @@ class Orchestrator:
                         f"avec des listes (pd.DataFrame({{'col': [...], 'val': [...]}})) — "
                         f"n'essaie pas de charger des fichiers.]"
                     )
-                    chart_response = self.analytics_agent.chat(chart_msg)
+                    chart_response = self._run_base_agent(
+                        runtime_state,
+                        "analytics",
+                        lambda: self.analytics_agent._chat_internal(
+                            chart_msg, domain_context=self._active_domain
+                        ),
+                    )
                     if chart_response and "⚠️ No response" not in chart_response:
                         # Keep researcher info in response header, replace body with chart
                         response = chart_response
@@ -953,18 +1199,48 @@ class Orchestrator:
 
             elif agent_key == "prediction":
                 if self.prediction_agent:
-                    pred_result = self.prediction_agent.chat(user_message)
+                    # Inject recent conversation context so the prediction agent can
+                    # resolve implicit references ("même voie", "idem", "pour 2028 aussi").
+                    # Mirror the researcher→analytics injection pattern (lines 893–921).
+                    actual_pred_message = user_message
+                    if self.conversation_log:
+                        recent = self.conversation_log[-max(4, ORCHESTRATOR_RECENT_EXCHANGES * 2):]
+                        ctx_lines = []
+                        for role, text in recent:
+                            short = text[:350].replace("\n", " ")
+                            prefix = "USER" if role == "user" else role.upper()
+                            ctx_lines.append(f"  {prefix}: {short}")
+                        if self._session_summary:
+                            ctx_lines.insert(0, f"  RÉSUMÉ: {self._session_summary[:1000]}")
+                        ctx_block = "\n".join(ctx_lines)
+                        actual_pred_message = (
+                            f"{user_message}\n\n"
+                            f"[Historique récent pour résoudre les références implicites:\n"
+                            f"{ctx_block}]"
+                        )
+                    pred_result = self.prediction_agent.chat(actual_pred_message)
                     response = pred_result["response"]
+                    chart_path = pred_result.get("chart_path")
                 else:
                     # Fallback: route to analytics if prediction agent unavailable
                     logger.warning("PredictionAgent unavailable — routing to analytics")
-                    response = self.analytics_agent.chat(user_message)
+                    response = self._run_base_agent(
+                        runtime_state,
+                        "analytics",
+                        lambda: self.analytics_agent._chat_internal(
+                            user_message, domain_context=self._active_domain
+                        ),
+                    )
                     agent_key = "analytics"
                     agent_icon = "📊"
                     agent_name = "Analyste de Données"
 
             else:
-                response = self.normal_agent.chat(user_message)
+                response = self._run_base_agent(
+                    runtime_state,
+                    "normal",
+                    lambda: self.normal_agent._chat_internal(user_message),
+                )
 
         except Exception as e:
             response = f"❌ Erreur: {str(e)}"
@@ -975,6 +1251,20 @@ class Orchestrator:
             )
 
         total_time = (time.time() - start) * 1000
+
+        # ── Update domain context ──
+        # Detect domain from the combined user message + response so follow-ups
+        # ("et en 2025", "et pour 2024?") inherit the right table context.
+        # A newly detected domain always wins; if ambiguous (None) we keep the
+        # current domain so short follow-ups don't reset it to unknown.
+        detected = _detect_domain(user_message + " " + response[:600])
+        if detected is not None:
+            if detected != self._active_domain:
+                logger.debug(
+                    "Domain context: %s → %s", self._active_domain, detected
+                )
+            self._active_domain = detected
+        # else: keep current domain — ambiguous turn, likely a follow-up
 
         # ── Update state ──
         self.last_agent = agent_key
@@ -1007,6 +1297,7 @@ class Orchestrator:
             "agent_icon": agent_icon,
             "agent_name": agent_name,
             "response": response,
+            "chart_path": chart_path,
             "rerouted": rerouted,
             "classification_time_ms": round(classification_time, 1),
             "total_time_ms": round(total_time, 1),
@@ -1144,6 +1435,7 @@ class Orchestrator:
         self.analytics_agent.reset_conversation()
 
         self.last_agent = None
+        self._active_domain = None
         self.conversation_log.clear()
         self.routing_history.clear()
         self.message_count = 0

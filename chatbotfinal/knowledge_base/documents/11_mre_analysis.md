@@ -1,6 +1,6 @@
 # 👥 Analyse MRE vs TES
 
-> Généré le 2026-04-12 11:00
+> Généré le 2026-05-05 21:34
 
 ## Définitions
 - **MRE** (Marocains Résidant à l'Étranger) : Marocains vivant hors du Maroc qui rentrent au pays

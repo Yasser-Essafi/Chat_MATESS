@@ -82,7 +82,7 @@ class KnowledgeGenerator:
             ("01_data_dictionary.md",        self._gen_data_dictionary),
             ("02_statistical_overview.md",    self._gen_statistical_overview),
             ("03_kpi_definitions.md",         self._gen_kpi_definitions),
-            ("04_country of residence_analysis.md",    self._gen_country of residence_analysis),
+            ("04_pays_residence_analysis.md",    self._gen_pays_residence_analysis),
             ("05_border_posts_reference.md",  self._gen_border_posts),
             ("06_regional_analysis.md",       self._gen_regional_analysis),
             ("07_temporal_trends.md",         self._gen_temporal_trends),
@@ -288,9 +288,9 @@ class KnowledgeGenerator:
 """
 
     # ===================================================================
-    #  04 — Nationality Analysis
+    #  04 — Pays de Residence Analysis
     # ===================================================================
-    def _gen_country of residence_analysis(self) -> str:
+    def _gen_pays_residence_analysis(self) -> str:
         df = self.df
 
         # Overall top 20
