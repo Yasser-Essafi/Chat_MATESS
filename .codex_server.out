@@ -1,0 +1,12 @@
+
+==========================================================
+  Assistant Tourisme Maroc -- Ministère du Tourisme
+  Ministere du Tourisme, Artisanat & Economie Sociale
+==========================================================
+
+Initialisation du système en arrière-plan...
+🌐 Serveur disponible sur: http://localhost:5000
+   Appuyez sur Ctrl+C pour arrêter.
+
+ * Serving Flask app 'server'
+ * Debug mode: off

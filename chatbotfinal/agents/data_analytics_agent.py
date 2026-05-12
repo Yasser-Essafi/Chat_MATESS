@@ -30,6 +30,7 @@ import re
 import glob
 import signal
 import contextlib
+import unicodedata
 from io import StringIO
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
@@ -48,6 +49,14 @@ except ImportError:
     go = None
     PLOTLY_AVAILABLE = False
 
+# Premium chart engine
+from utils.chart_engine import (
+    ChartEngine, get_chart_namespace, CHART_TYPES, PREMIUM_COLORS,
+    chart_bar, chart_line, chart_area, chart_pie, chart_donut,
+    chart_treemap, chart_sunburst, chart_heatmap, chart_scatter,
+    chart_combo, chart_choropleth, chart_save,
+)
+
 from config.settings import (
     SYSTEM_PROMPTS,
     ANALYTICS_TEMPERATURE,
@@ -65,6 +74,8 @@ from utils.base_agent import BaseAgent
 from utils.logger import get_logger
 
 logger = get_logger("statour.analytics")
+
+MAX_RESPONSE_CHARTS = 4
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -260,7 +271,7 @@ def execute_code_safe(
             - chart_path (str|None): Path to generated chart, if any
             - error (str|None): Error message, if any
     """
-    result = {"output": "", "chart_path": None, "error": None}
+    result = {"output": "", "chart_path": None, "chart_paths": [], "error": None}
 
     # ── Security check ──
     is_safe, reason = _check_code_safety(code)
@@ -295,7 +306,12 @@ def execute_code_safe(
 
     # ── Execute ──
     try:
-        exec(code, exec_globals, {})
+        # Use one namespace for globals and locals. With separate namespaces,
+        # Python treats exec like a class body: lambdas/comprehensions/functions
+        # cannot reliably see variables assigned earlier in the generated code.
+        # A single namespace matches normal script execution while preserving
+        # restricted builtins and injected helpers.
+        exec(code, exec_globals, exec_globals)
         result["output"] = "".join(output_lines)
 
     except ExecutionTimeout:
@@ -353,6 +369,7 @@ class DataAnalyticsAgent(BaseAgent):
         self.datasets: Dict[str, Dict] = {}
         self.active_dataset_name: Optional[str] = None
         self.chart_count = 0
+        self.last_chart_paths: List[str] = []
         self.kpi_cache = None   # Will be set after data loads
         self._apf_df = None     # APF DataFrame kept in memory for KPI/prediction
         self._db = None         # DBLayer reference for SQL-on-demand queries
@@ -865,12 +882,91 @@ class DataAnalyticsAgent(BaseAgent):
             "2. Préfixer toutes les tables avec [dbo_GOLD].\n"
             "3. AGRÉGER côté SQL (GROUP BY, SUM, COUNT, TOP N) — jamais ramener millions de lignes.\n"
             "4. Filtres temporels : `WHERE YEAR(date_stat) = 2025 AND MONTH(date_stat) = 7`.\n"
-            "5. Pré-loaded : pd, np, px, go, to_md(df), MONTH_NAMES_FR.\n"
+            "5. Pré-loaded : pd, np, px, go, to_md(df), MONTH_NAMES_FR, chart_* functions, save_chart.\n"
             "6. Tableaux : `print(to_md(result))`.\n"
-            "7. Charts (uniquement si demandé) : `fig.write_html('CHART_PATH')`.\n"
+            "7. ⚠️ GRAPHIQUES OBLIGATOIRES : Si l'utilisateur mentionne 'graphique', 'graph', 'chart',\n"
+            "   'visualisation', 'courbe', 'évolution', 'comparaison', 'compare', ou demande de\n"
+            "   'créer'/'crée'/'génère'/'montre'/'affiche' un graphique → tu DOIS générer le(s)\n"
+            "   graphique(s) avec les fonctions chart_* premium ci-dessous, PAS juste les recommander.\n"
+            "   JAMAIS écrire 'Graphes recommandés' ou 'pour créer le graphique vous pouvez...'.\n"
+            "   GÉNÈRE TOUJOURS les graphiques demandés en code Python EXÉCUTABLE.\n"
+            "   Maximum 4 graphiques; au-delà, résumer en tableau.\n"
+            "   ⚠️ TOUJOURS appeler `save_chart(fig, 'titre_court')` pour persister chaque graphique\n"
+            "   et l'afficher dans la conversation. Sans save_chart, le graphique n'est PAS affiché.\n"
             "8. NOMS DE MOIS : JAMAIS écrire un CASE SQL pour les noms de mois.\n"
             "   Utiliser Python post-traitement : `df['mois_fr'] = df['mois'].map(MONTH_NAMES_FR)`\n"
             "   MONTH_NAMES_FR = {1:'Janvier', 2:'Février', ..., 12:'Décembre'} (clés entières 1-12).\n\n"
+        )
+
+        chart_docs = (
+            "━━ FONCTIONS GRAPHIQUES PREMIUM (ChartEngine) ━━━━━━━━━━━━━━━━━━\n"
+            "Toutes ces fonctions retournent un objet Figure Plotly avec style premium MTAESS.\n"
+            "⚠️ TOUJOURS appeler `save_chart(fig, 'titre_court')` (PAS chart_save!) pour\n"
+            "que le graphique soit affiché dans la conversation. save_chart enregistre ET\n"
+            "publie le graphique. Maximum 4 graphiques par réponse.\n\n"
+            "TYPES DE GRAPHIQUES DISPONIBLES (chacun retourne une Figure):\n"
+            "  chart_bar(df, x, y, color=None, title='', subtitle='', horizontal=False, height=600)\n"
+            "    → Barres verticales/horizontales. Ex: top pays, comparaisons par catégorie.\n\n"
+            "  chart_line(df, x, y, color=None, title='', subtitle='', height=600, markers=True)\n"
+            "    → Courbes temporelles. Ex: évolution mensuelle/annuelle.\n"
+            "    → Pour séries multiples (plusieurs villes/pays), utiliser color='ville'.\n\n"
+            "  chart_area(df, x, y, color=None, title='', subtitle='', height=600)\n"
+            "    → Aire empilée pour séries temporelles.\n\n"
+            "  chart_pie(df, names, values, title='', subtitle='', height=550)\n"
+            "    → Camembert pour répartitions.\n\n"
+            "  chart_donut(df, names, values, title='', subtitle='', height=550)\n"
+            "    → Donut avec total au centre.\n\n"
+            "  chart_treemap(df, path, values, title='', subtitle='', height=600)\n"
+            "    → Treemap hiérarchique. path = ['continent', 'pays']\n\n"
+            "  chart_sunburst(df, path, values, title='', subtitle='', height=600)\n"
+            "    → Sunburst radial hiérarchique.\n\n"
+            "  chart_heatmap(df, x, y, z, title='', subtitle='', height=600)\n"
+            "    → Heatmap. Ex: mois × année × arrivées.\n\n"
+            "  chart_scatter(df, x, y, color=None, title='', subtitle='', height=600, trendline=False)\n"
+            "    → Nuage de points. trendline=True ajoute régression.\n\n"
+            "  chart_combo(df, x, bar_y, line_y, title='', subtitle='', height=600)\n"
+            "    → Barres + ligne sur 2 axes Y. Ex: arrivées (bars) vs croissance (ligne).\n\n"
+            "  chart_choropleth(df, locations, z, title='', subtitle='', height=650)\n"
+            "    → Carte choroplèthe des régions du Maroc. locations = colonne avec noms de régions.\n\n"
+            "  chart_waterfall(df, x, y, title='', subtitle='', height=550)\n"
+            "    → Cascade pour variations cumulées.\n\n"
+            "  chart_funnel(df, x, y, title='', subtitle='', height=550)\n"
+            "    → Entonnoir pour conversions.\n\n"
+            "EXEMPLE 1 — UN graphique (top pays):\n"
+            "```python\n"
+            "df = sql(\"SELECT TOP 10 nationalite, SUM(mre+tes) AS arrivees FROM [dbo_GOLD].[fact_statistiques_apf] WHERE YEAR(date_stat)=2024 GROUP BY nationalite ORDER BY arrivees DESC\")\n"
+            "fig = chart_bar(df, x='nationalite', y='arrivees', title='Top 10 pays de résidence APF', subtitle='Année 2024')\n"
+            "save_chart(fig, 'top_pays_2024')  # ← affiche dans la conversation\n"
+            "```\n\n"
+            "EXEMPLE 2 — DEUX graphiques (évolution + comparaison):\n"
+            "```python\n"
+            "# Graphique 1 : Évolution mensuelle Casablanca\n"
+            "evo = sql(\"SELECT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois, SUM(nuitees) AS nuitees FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE ville_name='Casablanca' AND YEAR(date_stat) BETWEEN 2024 AND 2026 GROUP BY YEAR(date_stat), MONTH(date_stat) ORDER BY annee, mois\")\n"
+            "evo['periode'] = evo['annee'].astype(str) + '-' + evo['mois'].astype(str).str.zfill(2)\n"
+            "fig1 = chart_line(evo, x='periode', y='nuitees', title='Évolution mensuelle des nuitées Casablanca', subtitle='2024-2026')\n"
+            "save_chart(fig1, 'evolution_casablanca')\n\n"
+            "# Graphique 2 : Comparaison entre villes\n"
+            "comp = sql(\"SELECT ville_name AS ville, YEAR(date_stat) AS annee, SUM(nuitees) AS nuitees FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE ville_name IN ('Casablanca','Marrakech','Agadir','Rabat') AND YEAR(date_stat) BETWEEN 2024 AND 2026 GROUP BY ville_name, YEAR(date_stat) ORDER BY annee, ville\")\n"
+            "fig2 = chart_bar(comp, x='annee', y='nuitees', color='ville', title='Comparaison nuitées par ville', subtitle='Casablanca vs Marrakech vs Agadir vs Rabat')\n"
+            "save_chart(fig2, 'comparaison_villes')\n"
+            "```\n\n"
+            "PALETTES DISPONIBLES: PREMIUM_COLORS['primary'], ['morocco_gradient'], ['ocean_gradient'], ['sunset_gradient']\n\n"
+            "━━ FORMAT DE RÉPONSE NARRATIF ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Ta réponse doit être un RÉCIT ANALYTIQUE structuré, PAS un dump de données brutes.\n"
+            "Structure attendue :\n"
+            "1. Paragraphe d'introduction et contexte\n"
+            "2. [GRAPHIQUE_1] ← marqueur où le 1er graphique sera inséré\n"
+            "3. Paragraphe commentant le graphique (tendances, chiffres clés)\n"
+            "4. [GRAPHIQUE_2] ← marqueur pour le 2e graphique si applicable\n"
+            "5. Paragraphe comparatif / facteurs explicatifs\n"
+            "6. Conclusion / recommandations\n\n"
+            "RÈGLES :\n"
+            "- Place [GRAPHIQUE_N] (N=1,2,3,4) dans ton texte là où chaque graphique doit apparaître\n"
+            "- N correspond à l'ordre d'appel de save_chart() dans le code\n"
+            "- JAMAIS afficher de noms de tables SQL, chemins de fichiers, ou noms de colonnes internes\n"
+            "- JAMAIS inclure de lignes 'NOTE:' techniques\n"
+            "- Utilise 'données d'hébergement' ou 'données aux postes frontières' au lieu des noms de tables\n"
+            "- Les tableaux de données (to_md) sont OK mais doivent être commentés dans le récit\n\n"
         )
 
         examples = (
@@ -906,6 +1002,7 @@ class DataAnalyticsAgent(BaseAgent):
         return (
             base_intro
             + sql_rules
+            + chart_docs
             + f"━━ SCHÉMAS DÉTAILLÉS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{schemas_text}\n\n"
             + (f"{values_text}\n\n" if values_text else "")
             + examples
@@ -1007,6 +1104,7 @@ class DataAnalyticsAgent(BaseAgent):
             return {
                 "output": "",
                 "chart_path": None,
+                "chart_paths": [],
                 "error": "No tables catalogued — Fabric connection may be down.",
             }
 
@@ -1014,6 +1112,7 @@ class DataAnalyticsAgent(BaseAgent):
             return {
                 "output": "",
                 "chart_path": None,
+                "chart_paths": [],
                 "error": "Fabric connection unavailable — cannot run SQL.",
             }
 
@@ -1023,8 +1122,15 @@ class DataAnalyticsAgent(BaseAgent):
         # ── Generate unique chart path ──
         self.chart_count += 1
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        chart_filename = f"chart_{timestamp}_{self.chart_count}.html"
+        chart_run_id = f"{timestamp}_{self.chart_count}"
+        chart_filename = f"chart_{chart_run_id}_1.html"
         chart_path = os.path.join(CHARTS_DIR, chart_filename).replace("\\", "/")
+        chart_paths: List[str] = []
+
+        def _register_chart(path: str) -> str:
+            if path and path not in chart_paths:
+                chart_paths.append(path)
+            return path
 
         # Replace placeholder in code
         code = code.replace("CHART_PATH", chart_path)
@@ -1039,12 +1145,40 @@ class DataAnalyticsAgent(BaseAgent):
             DBLayer.SAFE_QUERY_ROW_LIMIT rows."""
             return db_ref.safe_query(query)
 
+        def _save_chart(fig, label: Optional[str] = None) -> Optional[str]:
+            """Persist a Plotly figure and register it as a response artifact."""
+            if len(chart_paths) >= MAX_RESPONSE_CHARTS:
+                print(
+                    f"Limite graphiques atteinte ({MAX_RESPONSE_CHARTS}). "
+                    "Graphique supplementaire ignore; presenter les donnees en tableau."
+                )
+                return None
+            index = len(chart_paths) + 1
+            safe_label = re.sub(
+                r"[^A-Za-z0-9_-]+",
+                "_",
+                str(label or f"chart_{index}"),
+            ).strip("_")[:36]
+            suffix = f"_{safe_label}" if safe_label else ""
+            path = os.path.join(
+                CHARTS_DIR,
+                f"chart_{chart_run_id}_{index}{suffix}.html",
+            ).replace("\\", "/")
+            fig.write_html(
+                path,
+                include_plotlyjs="cdn",
+                full_html=True,
+                config={"responsive": True, "displaylogo": False},
+            )
+            return _register_chart(path)
+
         exec_globals = {
             "sql": _sandbox_sql,
             "pd": pd,
             "np": np,
             "MONTH_NAMES_FR": MONTH_NAMES_FR,
             "months_fr": MONTH_NAMES_FR,
+            "save_chart": _save_chart,
             # Helper: renders a DataFrame as a markdown table string
             "to_md": _df_to_markdown,
         }
@@ -1059,6 +1193,10 @@ class DataAnalyticsAgent(BaseAgent):
         except ImportError:
             logger.warning("Plotly not available; chart generation will fail")
 
+        # ── Inject premium chart engine namespace ──
+        # Provides chart_bar, chart_line, chart_pie, chart_save, etc.
+        exec_globals.update(get_chart_namespace())
+
         # ── Prepend critical helpers to the code so they're always defined ──
         # Prevents NameError on months_fr even if the model forgets to define it
         code_preamble = (
@@ -1072,7 +1210,10 @@ class DataAnalyticsAgent(BaseAgent):
 
         # ── Check for chart file ──
         if os.path.exists(chart_path):
-            result["chart_path"] = chart_path
+            _register_chart(chart_path)
+        result["chart_paths"] = chart_paths[:MAX_RESPONSE_CHARTS]
+        if result["chart_paths"]:
+            result["chart_path"] = result["chart_paths"][0]
             logger.debug("Chart generated: %s", chart_filename)
             # Chart was generated successfully — clear the error (it may be from
             # post-chart code like a summary print that doesn't affect the output)
@@ -1114,16 +1255,21 @@ class DataAnalyticsAgent(BaseAgent):
     # Error Fix Message Builder
     # ──────────────────────────────────────────────────────────────────────
 
-    def _build_fix_message(self, error: str) -> str:
+    def _build_fix_message(self, error: str, failed_code: str = "", original_question: str = "") -> str:
         """Build a detailed error fix message with catalog schema context (SQL-on-demand)."""
         if not self.active_dataset_name or self.active_dataset_name not in self.datasets:
             return f"Error: {error}\nFix the code."
 
         dataset_info = self.datasets[self.active_dataset_name]
 
-        fix_msg = (
-            f"The code produced this error:\n{error}\n\n"
-        )
+        fix_msg = f"The generated analytics code failed.\n\nOriginal user question:\n{original_question}\n\nError:\n{error}\n\n"
+        if failed_code:
+            fix_msg += (
+                "Failed code that must be repaired completely:\n"
+                "```python\n"
+                f"{failed_code[:6000]}\n"
+                "```\n\n"
+            )
 
         # ── NameError: spell out the undefined variable explicitly ──
         import re as _re
@@ -1160,7 +1306,7 @@ class DataAnalyticsAgent(BaseAgent):
             "- Pre-loaded: sql, pd, np, px (plotly.express), go (plotly.graph_objects), to_md, MONTH_NAMES_FR.\n"
             "- Do NOT use import statements — all libraries are already available.\n"
             "- Print DataFrames with: print(to_md(result)) — never use to_string().\n"
-            "- Save chart with: fig.write_html('CHART_PATH')\n"
+            "- Save charts with: save_chart(fig, 'titre court') (max 4). For one legacy chart, fig.write_html('CHART_PATH') is also accepted.\n"
             "- Always call print() on results.\n"
         )
 
@@ -1243,6 +1389,24 @@ class DataAnalyticsAgent(BaseAgent):
         # ── E. Strip PART N — labels ──
         text = re.sub(r"(?m)^PART\s+\d+\s*[—–\-]+\s*[^\n]*\n?", "", text)
 
+        # ── F-bis. Strip NOTE/NB sentences with internal terms (before table stripping) ──
+        sentences2 = re.split(r'(?<=[.!?])\s+', text)
+        _internal_kw = ["fact_", "dbo_GOLD", "eht_id", "nationalite_name",
+                        "hebergementnationalite", "table fact"]
+        text = " ".join(
+            s for s in sentences2
+            if not (s.lstrip().upper().startswith(("NOTE:", "NB:"))
+                    and any(k in s for k in _internal_kw))
+        )
+
+        # ── F-ter. Strip internal table/schema references ──
+        text = re.sub(r"\[dbo_GOLD\]\.\[[^\]]+\]", "", text)
+        text = re.sub(r"(?i)\b(table\s+)?fact_statistiques\w*", "", text)
+        text = re.sub(r"(?i)\bgld_dim_\w+", "", text)
+
+        # ── F-quater. Strip chart path lines ──
+        text = re.sub(r"(?m)^.*(?:Chart:|charts[/\\])\S*\.html.*$\n?", "", text)
+
         # ── F. Collapse multiple blank lines ──
         text = re.sub(r"\n{3,}", "\n\n", text)
 
@@ -1268,26 +1432,444 @@ class DataAnalyticsAgent(BaseAgent):
         if exec_result.get("output"):
             output = exec_result["output"].strip()
             if output:
-                # Strip file path lines
                 clean_lines = [
                     line for line in output.split("\n")
                     if not ((".html" in line or os.sep in line)
                             and any(c in line for c in ["charts/", "charts\\", "chart_", ".html"]))
                 ]
                 output = "\n".join(clean_lines).strip()
-                # Fix column labels in exec output
                 output = self._clean_response_text(output, is_exec_output=True)
             if output:
                 parts.append(f"\n{output}")
 
-        if exec_result.get("chart_path"):
-            parts.append(f"\n📊 Chart: {exec_result['chart_path']}")
+        result = "\n".join(parts) if parts else "Analyse terminée."
 
-        return "\n".join(parts) if parts else "✅ Analyse terminée."
+        result = re.sub(
+            r"\[GRAPHIQUE[_ ](\d+)\]",
+            lambda m: f"<!-- chart:{m.group(1)} -->",
+            result,
+        )
+
+        return result
 
     # ──────────────────────────────────────────────────────────────────────
     # Main Chat — Thread-safe
     # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _norm_text(text: str) -> str:
+        """Lowercase ASCII-ish text for robust French intent matching."""
+        if any(marker in (text or "") for marker in ("Ã", "Â", "â")):
+            try:
+                text = text.encode("latin1").decode("utf-8")
+            except Exception:
+                pass
+        text = unicodedata.normalize("NFKD", text or "")
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+        return text.lower()
+
+    @staticmethod
+    def _fmt_num(value) -> str:
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{int(round(float(value))):,}"
+
+    @staticmethod
+    def _extract_year_from_text(message: str, default: Optional[int] = None) -> Optional[int]:
+        m = re.search(r"\b(20[12]\d)\b", message or "")
+        return int(m.group(1)) if m else default
+
+    def _extract_month_from_text(self, message: str) -> Optional[Tuple[int, str]]:
+        norm = self._norm_text(message)
+        months = [
+            ("janvier", 1, "Janvier"), ("janv", 1, "Janvier"), ("jan", 1, "Janvier"),
+            ("fevrier", 2, "Fevrier"), ("fev", 2, "Fevrier"), ("feb", 2, "Fevrier"),
+            ("mars", 3, "Mars"), ("avril", 4, "Avril"), ("avr", 4, "Avril"),
+            ("mai", 5, "Mai"), ("juin", 6, "Juin"), ("juillet", 7, "Juillet"),
+            ("juil", 7, "Juillet"), ("aout", 8, "Aout"), ("septembre", 9, "Septembre"),
+            ("sept", 9, "Septembre"), ("octobre", 10, "Octobre"),
+            ("novembre", 11, "Novembre"), ("decembre", 12, "Decembre"),
+            ("dec", 12, "Decembre"),
+        ]
+        for token, num, label in months:
+            if re.search(r"\b" + re.escape(token) + r"\b", norm):
+                return num, label
+        return None
+
+    def _latest_complete_hebergement_year(self) -> Optional[int]:
+        if not getattr(self, "_db", None) or self._db.source != "fabric":
+            return None
+        try:
+            hbg = self._db._qualify("fact_statistiqueshebergementnationaliteestimees")
+            df = self._db.safe_query(
+                f"SELECT YEAR(date_stat) AS annee, COUNT(DISTINCT MONTH(date_stat)) AS mois_count "
+                f"FROM {hbg} WHERE date_stat IS NOT NULL "
+                f"GROUP BY YEAR(date_stat) HAVING COUNT(DISTINCT MONTH(date_stat)) = 12 "
+                f"ORDER BY annee DESC"
+            )
+            if not df.empty:
+                return int(df.iloc[0]["annee"])
+        except Exception as e:
+                logger.debug("Latest complete hebergement year lookup failed: %s", e)
+        return None
+
+    def _stamp_period(self, response: str, user_message: str) -> str:
+        years = list(dict.fromkeys(re.findall(r"\b(20[12]\d)\b", user_message or "")))
+        if len(years) == 1 and years[0] not in (response or ""):
+            return f"Periode demandee: {years[0]}.\n\n{response}"
+        return response
+
+    def _write_monthly_chart(self, df: pd.DataFrame, title: str, x_col: str, y_col: str) -> Optional[str]:
+        """Generate a monthly chart using the premium ChartEngine."""
+        try:
+            os.makedirs(CHARTS_DIR, exist_ok=True)
+            self._cleanup_old_charts()
+            self.chart_count += 1
+            
+            # Use premium chart engine for consistent styling
+            fig = chart_line(df, x=x_col, y=y_col, title=title, markers=True, height=500)
+            
+            # Save with premium settings
+            path = chart_save(fig, prefix=f"monthly_{self.chart_count}")
+            self.last_chart_paths = [path]
+            return path
+        except Exception as e:
+            logger.warning("Deterministic chart generation failed: %s", e)
+            return None
+
+    def _try_city_comparison_answer(self, user_message: str, hbg_table: str) -> Optional[str]:
+        """Deterministic city evolution/comparison answer with contract charts."""
+        msg = self._norm_text(user_message)
+        asks_city = "casablanca" in msg
+        asks_chart = any(k in msg for k in ["graph", "graphe", "graphique", "chart", "courbe", "visualis"])
+        asks_comparison = any(k in msg for k in ["compare", "comparaison", "autre ville", "autres villes", "marrakech", "tanger"])
+        if not (asks_city and asks_chart and asks_comparison):
+            return None
+
+        latest_year = self._latest_complete_hebergement_year()
+        if not latest_year:
+            latest_year = 2025
+        start_year = latest_year - 2
+        case_sql = (
+            "CASE "
+            "WHEN UPPER(province_name) LIKE '%CASABLANCA%' THEN 'Casablanca' "
+            "WHEN UPPER(province_name) LIKE '%MARRAKECH%' THEN 'Marrakech' "
+            "WHEN UPPER(province_name) LIKE '%TANGER%' THEN 'Tanger' "
+            "ELSE 'Autre' END"
+        )
+        city_filter = (
+            "UPPER(province_name) LIKE '%CASABLANCA%' OR "
+            "UPPER(province_name) LIKE '%MARRAKECH%' OR "
+            "UPPER(province_name) LIKE '%TANGER%'"
+        )
+        try:
+            df = self._db.safe_query(
+                f"""
+                SELECT YEAR(date_stat) AS annee,
+                       {case_sql} AS ville,
+                       SUM(arrivees) AS arrivees,
+                       SUM(nuitees) AS nuitees
+                FROM {hbg_table}
+                WHERE YEAR(date_stat) BETWEEN {start_year} AND {latest_year}
+                  AND ({city_filter})
+                GROUP BY YEAR(date_stat), {case_sql}
+                ORDER BY annee, ville
+                """
+            )
+            if df.empty:
+                return None
+
+            df["annee"] = df["annee"].astype(int)
+            df["arrivees"] = pd.to_numeric(df["arrivees"], errors="coerce").fillna(0)
+            df["nuitees"] = pd.to_numeric(df["nuitees"], errors="coerce").fillna(0)
+            os.makedirs(CHARTS_DIR, exist_ok=True)
+            self._cleanup_old_charts()
+
+            paths: List[str] = []
+            evo = df[df["ville"] == "Casablanca"].copy()
+            if not evo.empty:
+                self.chart_count += 1
+                fig = chart_line(
+                    evo,
+                    x="annee",
+                    y="arrivees",
+                    title=f"Casablanca - evolution des arrivees hotelieres ({start_year}-{latest_year})",
+                    markers=True,
+                    height=500,
+                )
+                paths.append(chart_save(fig, prefix=f"casablanca_evolution_{self.chart_count}"))
+
+            comp = df[df["annee"] == latest_year].copy()
+            if not comp.empty:
+                comp = comp.sort_values("arrivees", ascending=False)
+                self.chart_count += 1
+                fig = chart_bar(
+                    comp,
+                    x="ville",
+                    y="arrivees",
+                    title=f"Comparaison des arrivees hotelieres - {latest_year}",
+                    height=500,
+                )
+                paths.append(chart_save(fig, prefix=f"city_comparison_{self.chart_count}"))
+
+            self.last_chart_paths = [p for p in paths if p]
+            if not self.last_chart_paths:
+                return None
+
+            comp_display = comp[["ville", "arrivees", "nuitees"]].rename(
+                columns={"ville": "Ville", "arrivees": "Arrivees", "nuitees": "Nuitees"}
+            )
+            evo_display = evo[["annee", "arrivees", "nuitees"]].rename(
+                columns={"annee": "Annee", "arrivees": "Arrivees Casablanca", "nuitees": "Nuitees Casablanca"}
+            )
+            casa_latest = evo[evo["annee"] == latest_year]
+            casa_first = evo[evo["annee"] == start_year]
+            growth = None
+            if not casa_latest.empty and not casa_first.empty:
+                first = float(casa_first.iloc[0]["arrivees"] or 0)
+                latest = float(casa_latest.iloc[0]["arrivees"] or 0)
+                if first:
+                    growth = (latest / first - 1) * 100
+            growth_line = (
+                f"Casablanca progresse de {growth:+.1f}% sur {start_year}-{latest_year}."
+                if growth is not None
+                else "Casablanca dispose d'une serie exploitable sur la periode retenue."
+            )
+            return (
+                f"## Synthese executive - Casablanca ({start_year}-{latest_year})\n"
+                f"- {growth_line}\n"
+                "- Marrakech reste le benchmark loisirs le plus puissant; Tanger capte une dynamique affaires/industrie/portuaire.\n"
+                "- Casablanca doit etre lue comme destination business, MICE et transit: la performance depend davantage des salons, de la connectivite aerienne, des taux d'occupation semaine et de la conversion leisure que d'un seul volume d'arrivees.\n\n"
+                "## Decisions pour top management\n"
+                "1. Piloter Casablanca avec un tableau de bord MICE/business separe du benchmark loisirs Marrakech.\n"
+                "2. Comparer mensuellement Casablanca a Marrakech et Tanger sur arrivees, nuitees et DMS, pas uniquement les arrivees.\n"
+                "3. Concentrer les actions sur connectivite, congresses, produits city-break et conversion des passagers en nuitees.\n\n"
+                "## Evolution Casablanca\n"
+                + _df_to_markdown(evo_display)
+                + "\n\n## Comparaison villes\n"
+                + _df_to_markdown(comp_display)
+                + "\n\nPerimetre: hebergement classe EHTC/STDN + estimatif; villes/provinces rapprochees via province_name. "
+                "Les arrivees APF ne sont pas un perimetre ville."
+            )
+        except Exception as e:
+            logger.debug("Deterministic city comparison failed: %s", e)
+            return None
+
+    def try_official_kpi_answer(self, user_message: str, domain_context: Optional[str] = None) -> Optional[str]:
+        """Answer high-frequency official KPI prompts with fixed SQL/templates."""
+        if not getattr(self, "_db", None) or self._db.source != "fabric":
+            return None
+
+        msg = self._norm_text(user_message)
+        years_all = list(dict.fromkeys(int(y) for y in re.findall(r"\b(20[12]\d)\b", user_message or "")))
+        year = years_all[0] if len(years_all) == 1 else None
+        month_info = self._extract_month_from_text(user_message)
+        apf = self._db._qualify("fact_statistiques_apf")
+        hbg = self._db._qualify("fact_statistiqueshebergementnationaliteestimees")
+
+        has_chart = any(k in msg for k in ["graphique", "graphe", "chart", "courbe", "visualis", "plot"])
+        asks_arrivals = any(k in msg for k in ["arrivee", "arrivees", "touriste", "touristes"])
+        asks_hotel = any(k in msg for k in ["hoteliere", "hotelieres", "hotel", "hebergement", "ehtc"])
+        asks_nights = any(k in msg for k in ["nuitee", "nuitees", "stdn"])
+        asks_dms = bool(re.search(r"\bdms\b", msg)) or "duree moyenne de sejour" in msg
+        asks_apf = any(k in msg for k in ["apf", "frontiere", "frontieres", "poste", "mre", "tes", "dgsn"])
+        asks_region = "region" in msg
+        asks_top_country = "top" in msg and any(k in msg for k in ["pays", "residence", "nationalite"])
+        asks_monthly = any(k in msg for k in ["par mois", "mensuel", "mensuelle", "mois"])
+        asks_voie = any(k in msg for k in ["voie", "aerien", "aeroport", "maritime", "terrestre"])
+
+        city_answer = self._try_city_comparison_answer(user_message, hbg)
+        if city_answer:
+            return city_answer
+
+        if month_info and asks_arrivals and not has_chart:
+            month_num, month_name = month_info
+            query_year = year or (self.kpi_cache.get("last_year") if self.kpi_cache else None)
+            if query_year:
+                try:
+                    sections = []
+                    if asks_apf or (not asks_hotel and domain_context != "hebergement"):
+                        apf_df = self._db.safe_query(
+                            f"SELECT SUM(mre) AS [MRE], SUM(tes) AS [TES], SUM(mre + tes) AS [Arrivees APF] "
+                            f"FROM {apf} WHERE YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
+                        )
+                        if not apf_df.empty:
+                            sections.append("APF/DGSN:\n" + _df_to_markdown(apf_df))
+                    if asks_hotel or (not asks_apf and domain_context != "apf"):
+                        hbg_df = self._db.safe_query(
+                            f"SELECT SUM(arrivees) AS [Arrivees hotelieres], SUM(nuitees) AS [Nuitees] "
+                            f"FROM {hbg} WHERE YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
+                        )
+                        if not hbg_df.empty:
+                            sections.append("Hebergement classe:\n" + _df_to_markdown(hbg_df))
+                    if sections:
+                        default_note = "" if year else " (annee la plus recente disponible)"
+                        return (
+                            f"## Arriv\u00e9es - {month_name} {query_year}{default_note}\n"
+                            + "\n\n".join(sections)
+                            + "\nPerimetres separes: APF = postes frontieres; hebergement = etablissements classes."
+                        )
+                except Exception as e:
+                    logger.debug("Deterministic monthly arrivals failed: %s", e)
+
+        if year and asks_apf and asks_arrivals and not has_chart:
+            total = self.kpi_cache.total_for_year(year) if self.kpi_cache else None
+            if total is not None:
+                mre = self.kpi_cache.get("mre_by_year", {}).get(year, 0)
+                tes = self.kpi_cache.get("tes_by_year", {}).get(year, 0)
+                response = f"En **{year}**, le Maroc a enregistre **{self._fmt_num(total)}** arrivees aux postes frontieres (APF)."
+                if mre or tes:
+                    mre_pct = round(mre / total * 100, 1) if total else 0
+                    tes_pct = round(tes / total * 100, 1) if total else 0
+                    response += f"\n\nDetail: **{self._fmt_num(mre)} MRE** ({mre_pct}%) et **{self._fmt_num(tes)} TES** ({tes_pct}%)."
+                return response + "\n\nPerimetre: APF/DGSN, arrivees aux postes frontieres."
+
+        if year and asks_hotel and asks_arrivals and not has_chart:
+            try:
+                df = self._db.safe_query(
+                    f"SELECT SUM(arrivees) AS arrivees_hotelieres, SUM(nuitees) AS nuitees "
+                    f"FROM {hbg} WHERE YEAR(date_stat) = {year}"
+                )
+                if not df.empty:
+                    row = df.iloc[0]
+                    return (
+                        f"En **{year}**, les **arrivees hotelieres** dans les etablissements d'hebergement classes "
+                        f"s'elevent a **{self._fmt_num(row['arrivees_hotelieres'])}**.\n\n"
+                        f"Nuitees associees: **{self._fmt_num(row['nuitees'])}**.\n\n"
+                        "Perimetre: hebergement classe EHTC/STDN + estimatif."
+                    )
+            except Exception as e:
+                logger.debug("Deterministic hotel arrivals failed: %s", e)
+
+        if year and asks_arrivals and not asks_apf and not asks_hotel and not has_chart:
+            try:
+                apf_total = self.kpi_cache.total_for_year(year) if self.kpi_cache else None
+                hbg_df = self._db.safe_query(
+                    f"SELECT SUM(arrivees) AS [Arrivees hotelieres], SUM(nuitees) AS [Nuitees] "
+                    f"FROM {hbg} WHERE YEAR(date_stat) = {year}"
+                )
+                sections = []
+                if apf_total is not None:
+                    sections.append(f"APF/DGSN: **{self._fmt_num(apf_total)}** arrivees aux postes frontieres.")
+                if not hbg_df.empty:
+                    sections.append("Hebergement classe:\n" + _df_to_markdown(hbg_df))
+                if sections:
+                    return (
+                        f"## Arriv\u00e9es - {year}\n"
+                        + "\n\n".join(sections)
+                        + "\n\nNote: la question est ambigue; les arriv\u00e9es APF et hebergement sont deux perimetres distincts."
+                    )
+            except Exception as e:
+                logger.debug("Deterministic ambiguous arrivals failed: %s", e)
+
+        if year and asks_nights and asks_region:
+            try:
+                df = self._db.safe_query(
+                    f"SELECT region_name AS [Region], SUM(nuitees) AS [Nuitees] "
+                    f"FROM {hbg} WHERE YEAR(date_stat) = {year} "
+                    f"GROUP BY region_name ORDER BY [Nuitees] DESC"
+                )
+                if not df.empty:
+                    return f"## Nuitees par region - {year}\n" + _df_to_markdown(df) + "\nPerimetre: hebergement classe EHTC/STDN + estimatif."
+            except Exception as e:
+                logger.debug("Deterministic nuitées by region failed: %s", e)
+
+        if year and asks_voie and not has_chart:
+            try:
+                df = self._db.safe_query(
+                    f"SELECT voie AS [Voie], SUM(mre) AS [MRE], SUM(tes) AS [TES], "
+                    f"SUM(mre + tes) AS [Arrivees APF] "
+                    f"FROM {apf} WHERE YEAR(date_stat) = {year} "
+                    f"GROUP BY voie ORDER BY [Arrivees APF] DESC"
+                )
+                if not df.empty:
+                    total = float(df["Arrivees APF"].sum() or 0)
+                    if total:
+                        df["Part (%)"] = (df["Arrivees APF"] / total * 100).round(1)
+                    return f"## Repartition par voie APF - {year}\n" + _df_to_markdown(df) + "\nPerimetre: APF/DGSN."
+            except Exception as e:
+                logger.debug("Deterministic APF by voie failed: %s", e)
+
+        if year and asks_top_country and (asks_apf or domain_context == "apf" or (not asks_hotel and not asks_nights)):
+            try:
+                df = self._db.safe_query(
+                    f"SELECT TOP 10 nationalite AS [Pays de residence], "
+                    f"SUM(mre) AS [MRE], SUM(tes) AS [TES], SUM(mre + tes) AS [Arrivees APF] "
+                    f"FROM {apf} WHERE YEAR(date_stat) = {year} "
+                    f"GROUP BY nationalite ORDER BY [Arrivees APF] DESC"
+                )
+                if not df.empty:
+                    return f"## Top 10 pays de residence APF - {year}\n" + _df_to_markdown(df)
+            except Exception as e:
+                logger.debug("Deterministic APF top countries failed: %s", e)
+
+        if year and asks_top_country and (asks_hotel or asks_nights or domain_context == "hebergement"):
+            try:
+                df = self._db.safe_query(
+                    f"SELECT TOP 10 nationalite_name AS [Pays de residence], "
+                    f"SUM(arrivees) AS [Arrivees hotelieres], SUM(nuitees) AS [Nuitees] "
+                    f"FROM {hbg} WHERE YEAR(date_stat) = {year} "
+                    f"GROUP BY nationalite_name ORDER BY [Arrivees hotelieres] DESC"
+                )
+                if not df.empty:
+                    return f"## Top 10 pays de residence hebergement - {year}\n" + _df_to_markdown(df)
+            except Exception as e:
+                logger.debug("Deterministic HBG top countries failed: %s", e)
+
+        if year and has_chart and asks_arrivals and asks_monthly:
+            try:
+                if asks_hotel or domain_context == "hebergement":
+                    df = self._db.safe_query(
+                        f"SELECT MONTH(date_stat) AS mois, SUM(arrivees) AS arrivees "
+                        f"FROM {hbg} WHERE YEAR(date_stat) = {year} "
+                        f"GROUP BY MONTH(date_stat) ORDER BY mois"
+                    )
+                    title = f"Arrivees hotelieres par mois - {year}"
+                    scope = "hebergement classe EHTC/STDN + estimatif"
+                else:
+                    df = self._db.safe_query(
+                        f"SELECT MONTH(date_stat) AS mois, SUM(mre + tes) AS arrivees "
+                        f"FROM {apf} WHERE YEAR(date_stat) = {year} "
+                        f"GROUP BY MONTH(date_stat) ORDER BY mois"
+                    )
+                    title = f"Arrivees APF par mois - {year}"
+                    scope = "APF/DGSN, postes frontieres"
+                if not df.empty:
+                    df["mois_fr"] = df["mois"].astype(int).map(MONTH_NAMES_FR)
+                    chart_path = self._write_monthly_chart(df, title, "mois_fr", "arrivees")
+                    if chart_path:
+                        self.last_chart_paths = [chart_path]
+                    if not chart_path:
+                        return "⚠️ Graphique demande, mais la generation Plotly a echoue. Les donnees sont disponibles:\n\n" + _df_to_markdown(df)
+                    display = df[["mois_fr", "arrivees"]].rename(columns={"mois_fr": "Mois", "arrivees": "Arrivees"})
+                    return f"## Graphique créé\n{title}.\n\n" + _df_to_markdown(display) + f"\nPérimètre : {scope}."
+            except Exception as e:
+                logger.debug("Deterministic monthly chart failed: %s", e)
+
+        if asks_dms:
+            dms_year = year or self._latest_complete_hebergement_year()
+            if dms_year:
+                try:
+                    df = self._db.safe_query(
+                        f"SELECT SUM(nuitees) AS nuitees, SUM(arrivees) AS arrivees "
+                        f"FROM {hbg} WHERE YEAR(date_stat) = {dms_year}"
+                    )
+                    if not df.empty:
+                        row = df.iloc[0]
+                        arrivals = float(row["arrivees"] or 0)
+                        nights = float(row["nuitees"] or 0)
+                        dms = nights / arrivals if arrivals else 0
+                        default_note = "" if year else " (derniere annee complete disponible)"
+                        return (
+                            f"## DMS - {dms_year}{default_note}\n"
+                            f"La **DMS (Duree Moyenne de Sejour)** est de **{dms:.2f} nuits**.\n\n"
+                            f"Calcul: **{self._fmt_num(nights)} nuitees** / **{self._fmt_num(arrivals)} arrivees hotelieres**.\n\n"
+                            "Perimetre: hebergement classe EHTC/STDN + estimatif. Cette DMS ne doit pas etre calculee avec les arrivees APF."
+                        )
+                except Exception as e:
+                    logger.debug("Deterministic DMS failed: %s", e)
+
+        return None
 
     def chat(self, user_message: str, domain_context: Optional[str] = None) -> str:
         """
@@ -1311,6 +1893,7 @@ class DataAnalyticsAgent(BaseAgent):
 
     def _chat_internal(self, user_message: str, domain_context: Optional[str] = None) -> str:
         """Internal chat logic (called with self._lock held)."""
+        self.last_chart_paths = []
 
         if not self.datasets:
             return (
@@ -1321,10 +1904,19 @@ class DataAnalyticsAgent(BaseAgent):
         # ── Fast-path: KPI cache (APF only) ──
         # domain_context="hebergement" → cache is APF-only, skip it entirely.
         # Per-message hébergement keywords are also checked inside try_answer().
+        official_answer = self.try_official_kpi_answer(user_message, domain_context=domain_context)
+        if official_answer:
+            logger.debug("Official KPI fast path hit for: %s", user_message[:60])
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append({"role": "assistant", "content": official_answer})
+            return official_answer
+
         if self.kpi_cache:
             fast_answer = self.kpi_cache.try_answer(user_message, domain_context=domain_context)
             if fast_answer:
                 logger.debug("KPI cache hit for: %s", user_message[:60])
+                self.conversation_history.append({"role": "user", "content": user_message})
+                self.conversation_history.append({"role": "assistant", "content": fast_answer})
                 return fast_answer
 
         self._trim_history()
@@ -1384,15 +1976,17 @@ class DataAnalyticsAgent(BaseAgent):
         code = self._extract_code(assistant_message)
         if not code:
             # No code block — return text response as-is
-            return assistant_message
+            return self._stamp_period(assistant_message, user_message)
 
         # ── Execute code ──
         logger.info("Executing analysis code...")
+        current_code = code
         exec_result = self._execute_analysis(code)
 
         # ── Success ──
         if not exec_result.get("error"):
-            return self._format_success(assistant_message, exec_result)
+            self.last_chart_paths = exec_result.get("chart_paths") or []
+            return self._stamp_period(self._format_success(assistant_message, exec_result), user_message)
 
         # ── Failure → Retry loop ──
         # FIX: Was range(1, MAX_RETRIES) which gave only MAX_RETRIES-1 attempts
@@ -1403,7 +1997,11 @@ class DataAnalyticsAgent(BaseAgent):
                 exec_result["error"][:100],
             )
 
-            fix_msg = self._build_fix_message(exec_result["error"])
+            fix_msg = self._build_fix_message(
+                exec_result["error"],
+                failed_code=current_code,
+                original_question=user_message,
+            )
 
             self.conversation_history.append({
                 "role": "user", "content": fix_msg
@@ -1428,11 +2026,13 @@ class DataAnalyticsAgent(BaseAgent):
                 continue
 
             logger.info("Re-executing (attempt %d/%d)...", attempt + 1, MAX_CODE_RETRIES + 1)
+            current_code = fixed_code
             exec_result = self._execute_analysis(fixed_code)
 
             if not exec_result.get("error"):
                 logger.info("Fix attempt %d succeeded", attempt)
-                return self._format_success(assistant_message, exec_result)
+                self.last_chart_paths = exec_result.get("chart_paths") or []
+                return self._stamp_period(self._format_success(assistant_message, exec_result), user_message)
 
         # ── All retries failed ──
         text_part = self._extract_text(assistant_message)

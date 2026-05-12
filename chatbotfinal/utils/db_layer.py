@@ -218,7 +218,7 @@ class DBLayer:
     _SQL_FORBIDDEN = (
         r"\b(insert|update|delete|drop|alter|truncate|create|merge|grant|"
         r"revoke|exec|execute|sp_executesql|xp_cmdshell|backup|restore|"
-        r"shutdown|kill|bulk|openrowset|opendatasource)\b"
+        r"shutdown|kill|bulk|openrowset|opendatasource|use|declare|set)\b"
     )
 
     # Hard cap on rows returned to the analytics sandbox — prevents the LLM
@@ -252,6 +252,15 @@ class DBLayer:
             raise ValueError("Empty SQL query")
 
         s = sql_text.strip().rstrip(";")
+        # Only one explicit read statement is allowed from the LLM sandbox.
+        # This blocks SELECT INTO, comment-smuggling, session changes and
+        # anything that is not clearly a SELECT / CTE query.
+        if not _re.match(r"^\s*(select|with)\b", s, _re.IGNORECASE):
+            raise PermissionError("Only SELECT/CTE read queries are allowed.")
+        if "--" in s or "/*" in s or "*/" in s:
+            raise PermissionError("SQL comments are not allowed in sandbox queries.")
+        if _re.search(r"\bselect\b[\s\S]{0,2000}\binto\b", s, _re.IGNORECASE):
+            raise PermissionError("SELECT INTO is forbidden in read-only mode.")
         if _re.search(self._SQL_FORBIDDEN, s, _re.IGNORECASE):
             raise PermissionError(
                 "Read-only SQL only — INSERT/UPDATE/DELETE/DDL forbidden."
@@ -265,7 +274,7 @@ class DBLayer:
         # doing the full scan first. Analytical queries should aggregate in SQL
         # or explicitly use TOP for inspection.
         if (
-            _re.search(r"\bselect\s+\*\b", s, _re.IGNORECASE)
+            _re.search(r"\bselect\s+\*", s, _re.IGNORECASE)
             and not _re.search(r"\btop\s*(?:\(|\d)", s, _re.IGNORECASE)
             and not _re.search(r"\bcount\s*\(", s, _re.IGNORECASE)
         ):

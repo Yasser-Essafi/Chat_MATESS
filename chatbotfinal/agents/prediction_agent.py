@@ -26,6 +26,7 @@ import re
 import json
 import threading
 import traceback
+import unicodedata
 from typing import Optional, Dict, Any, List, Tuple
 
 import pandas as pd
@@ -34,6 +35,40 @@ import numpy as np
 from utils.logger import get_logger
 
 logger = get_logger("statour.prediction_agent")
+
+
+def _norm_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.lower()
+
+
+def _unsupported_prediction_target(message: str) -> bool:
+    norm = _norm_text(message)
+    target = r"(?:mars|lune|jupiter|venus|saturne|mercure|neptune|uranus)"
+    if re.search(rf"\b(?:sur|vers|a|au|aux)\s+{target}\b", norm):
+        return True
+    if re.search(rf"\b(?:visit\w*|visite\w*)\b.{{0,40}}\b{target}\b", norm):
+        return True
+    if re.search(rf"\b{target}\b", norm) and re.search(r"\bplanete|spatial|extra[-\s]?terrestre\b", norm):
+        return True
+    return False
+
+
+def _unsupported_prediction_response() -> Dict[str, Any]:
+    return {
+        "response": (
+            "Je ne peux pas produire une prevision touristique fiable pour cette cible, "
+            "car elle sort du perimetre des donnees STATOUR. Si vous parlez du mois de "
+            "mars, precisez la metrique touristique souhaitee (APF, MRE/TES, nuitees, "
+            "region ou pays de residence) et je lancerai l'analyse adaptee."
+        ),
+        "chart_path": None,
+        "agent": AGENT_KEY,
+        "agent_name": AGENT_NAME,
+        "agent_icon": AGENT_ICON,
+        "prediction_context": {"blocked_prediction": True},
+    }
 
 # ── Agent identity ──
 AGENT_KEY   = "prediction"
@@ -579,9 +614,125 @@ class PredictionAgent:
             }
         """
         with self._lock:
-            return self._chat_internal(user_message)
+            parts = re.split(r"\n\s*\[Historique|\n\s*\[Contexte", user_message, maxsplit=1)
+            clean_message = parts[0].strip()
+            history_block = parts[1] if len(parts) > 1 else ""
+
+            clean_message = self._resolve_implicit_refs(clean_message, history_block)
+            if _unsupported_prediction_target(clean_message):
+                return _unsupported_prediction_response()
+            return self._chat_internal(clean_message)
+
+    def _resolve_implicit_refs(self, message: str, history_block: str) -> str:
+        """Resolve implicit follow-up references using conversation history.
+
+        Handles cases like "Et pour 2028 ?" after a 2027 prediction by
+        carrying over context (voie, metric type) from the previous turn.
+        Only injects missing parameters — never overwrites explicit ones.
+        """
+        if not history_block:
+            return message
+        if not self._is_implicit_followup(message):
+            return message
+
+        q = _norm_text(message)
+        has_year = bool(re.search(r"\b20[2-9]\d\b", q))
+
+        has_voie = any(
+            w in q
+            for w in ["aerien", "avion", "vol", "aeroport", "maritime",
+                       "mer", "bateau", "ferry", "terrestre", "route",
+                       "frontiere terrestre"]
+        )
+
+        if has_year and has_voie:
+            return message
+
+        hist_lower = _norm_text(history_block)
+
+        additions = []
+        if not has_voie:
+            if any(w in hist_lower for w in ["aerien", "avion", "vol"]):
+                additions.append("voie aerienne")
+            elif any(w in hist_lower for w in ["maritime", "mer", "bateau"]):
+                additions.append("voie maritime")
+            elif any(w in hist_lower for w in ["terrestre"]):
+                additions.append("voie terrestre")
+
+        if additions:
+            message = f"{message} ({', '.join(additions)})"
+
+        return message
 
     # ── Internal ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_implicit_followup(message: str) -> bool:
+        """Return True for short turns that depend on prior context."""
+        norm = _norm_text(message).strip()
+        words = norm.split()
+        if not words or len(words) > 7:
+            return False
+        if norm.startswith(("et ", "et pour", "pour ", "meme ", "idem", "pareil", "aussi")):
+            return True
+        if re.fullmatch(r"(?:20[2-9]\d|\?|\s)+", norm):
+            return True
+        return False
+
+    def _extract_target_year(self, user_message: str) -> int:
+        """Extract the forecast horizon from a potentially compound request."""
+        norm = _norm_text(user_message)
+        matches = list(re.finditer(r"\b(20[2-9]\d)\b", norm))
+        if not matches:
+            last_y, _ = self.engine._last_actual(complete_only=True)
+            return last_y + 1
+        if len(matches) == 1:
+            return int(matches[0].group(1))
+
+        forecast_terms = [
+            "prediction", "prevision", "prevoir", "prevois", "projection",
+            "estimation", "estime", "estimer", "forecast", "predict",
+            "scenario", "optimiste", "pessimiste",
+        ]
+        forecast_positions = [
+            m.start()
+            for term in forecast_terms
+            for m in re.finditer(r"\b" + re.escape(term) + r"\b", norm)
+        ]
+        first_forecast_pos = min(forecast_positions) if forecast_positions else None
+        last_actual_year, _ = self.engine._last_actual(complete_only=True)
+
+        scored: List[Tuple[int, int, int]] = []
+        for match in matches:
+            year = int(match.group(1))
+            pos = match.start()
+            before = norm[max(0, pos - 100):pos]
+            after = norm[pos:pos + 40]
+            score = 0
+
+            if year > last_actual_year:
+                score += 8
+            if first_forecast_pos is not None and pos > first_forecast_pos:
+                score += 10
+            if first_forecast_pos is not None and pos < first_forecast_pos:
+                score -= 10
+            if re.search(
+                r"(prediction|prevision|prevoir|prevois|projection|estimation|estime|estimer|forecast|predict)"
+                r"[^0-9]{0,80}$",
+                before,
+            ):
+                score += 18
+            if re.search(r"(pour|en|annee|horizon|cible)[^0-9]{0,25}$", before):
+                score += 5
+            if re.search(r"\b(de|depuis|entre)\s+(?:19|20)\d{2}[^.]{0,80}$", before):
+                score -= 8
+            if re.search(r"^\s*(?:jusqu|a|et|-)", after):
+                score -= 4
+
+            scored.append((score, pos, year))
+
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return scored[0][2]
 
     def _extract_months(self, message: str) -> List[int]:
         """Return the list of month numbers explicitly mentioned in the message.
@@ -717,12 +868,7 @@ class PredictionAgent:
         q = user_message.lower()
 
         # ── Parse target year ──
-        year_match = re.search(r"\b(20[2-9]\d)\b", q)
-        if year_match:
-            target_year = int(year_match.group(1))
-        else:
-            last_y, _ = self.engine._last_actual()
-            target_year = last_y + 1
+        target_year = self._extract_target_year(user_message)
 
         # ── Parse target months (e.g. "février et mai") ──
         target_months = self._extract_months(user_message)
@@ -747,24 +893,44 @@ class PredictionAgent:
         # generates a TARGETED query plan (period + metric + entities + geo)
         # instead of a fixed 8-query fan-out — fewer wasted queries, better
         # signal-to-noise on Tavily/Brave.
-        from utils.intent_extractor import IntentExtractor
-        intent_ext = IntentExtractor()
-        intent = intent_ext.extract(user_message)
-        intent.analysis_type = "causal"  # forecasting always needs causal context
-        # Rebuild factor categories now that analysis_type is forced to causal
-        intent.external_factors_categories = intent_ext._build_factor_categories(intent, user_message.lower())
-        targeted_queries = intent_ext.build_search_queries(intent)
-        web_block, _raw_grouped = self._dynamic_search(targeted_queries)
+        needs_external_context = any(
+            token in q
+            for token in [
+                "facteur", "facteurs", "contexte", "impact", "risque", "guerre",
+                "conflit", "crise", "pandemie", "pandémie", "covid", "recession",
+                "récession", "inflation", "coupe du monde", "mondial", "can ",
+                "connectivite", "connectivité", "aerien", "aérien",
+            ]
+        )
+        web_block = ""
+        if needs_external_context:
+            from utils.intent_extractor import IntentExtractor
+            intent_ext = IntentExtractor()
+            intent = intent_ext.extract(user_message)
+            intent.analysis_type = "causal"
+            intent.external_factors_categories = intent_ext._build_factor_categories(intent, user_message.lower())
+            targeted_queries = intent_ext.build_search_queries(intent)
+            web_block, _raw_grouped = self._dynamic_search(targeted_queries)
 
         # ── Combine keyword-matched factors with LLM-inferred ones ──
         detected_factors: List[str] = []
         for factor_key, keywords in _FACTOR_KEYWORDS.items():
+            if factor_key == "coupe_du_monde" and not any(
+                kw in q for kw in ["coupe du monde", "mondial", "world cup"]
+            ):
+                continue
             if any(kw in q for kw in keywords):
                 detected_factors.append(factor_key)
 
         if web_block:
             inferred = self._infer_factors_from_web(user_message, target_year, web_block)
+            negative_or_historical = {
+                "pandemie", "crise_economique", "recession_europe",
+                "guerre_regionale", "conflit_proche_orient", "reprise_post_covid",
+            }
             for k in inferred:
+                if k in negative_or_historical and not any(kw in q for kw in _FACTOR_KEYWORDS.get(k, [])):
+                    continue
                 if k not in detected_factors:
                     detected_factors.append(k)
             self._last_web_context = web_block
@@ -809,6 +975,11 @@ class PredictionAgent:
             "agent": AGENT_KEY,
             "agent_name": AGENT_NAME,
             "agent_icon": AGENT_ICON,
+            "prediction_context": {
+                "target_year": target_year,
+                "scenario": scenario,
+                "voie": voie,
+            },
         }
 
     def _format_response(self, pred: Dict[str, Any], voie: Optional[str]) -> str:

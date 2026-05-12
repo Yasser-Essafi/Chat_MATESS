@@ -6,7 +6,11 @@ import streamlit as st
 from typing import Optional
 
 from ui.state.session import Message
-from ui.components.chart_viewer import render_chart_from_message, render_chart
+from ui.components.chart_viewer import (
+    render_chart,
+    render_charts_from_message,
+    extract_chart_paths
+)
 
 
 def _get_agent_badge(agent: Optional[str], agent_name: Optional[str]) -> str:
@@ -20,8 +24,7 @@ def _get_agent_badge(agent: Optional[str], agent_name: Optional[str]) -> str:
         "analytics": ("#F39C12", "rgba(243,156,18,0.15)"),
     }
     color, bg = colors.get(agent, ("#A0A4B0", "rgba(160,164,176,0.15)"))
-    icons = {"normal": "🏛️", "researcher": "🔍", "analytics": "📊"}
-    icon = icons.get(agent, "🤖")
+    icon = ""
     name = agent_name or agent.title()
 
     return (
@@ -136,14 +139,17 @@ def render_message(msg: Message):
             if clean_content:
                 st.markdown(clean_content)
 
-            # Render chart if present
-            chart_rendered = False
+            # Render charts if present (supports multiple charts)
+            charts_rendered = 0
+            
+            # First try to render from explicit chart_path
             if msg.chart_path:
-                chart_rendered = render_chart(msg.chart_path)
-
-            # Fallback: try to extract chart from content
-            if not chart_rendered:
-                render_chart_from_message(msg.content)
+                if render_chart(msg.chart_path):
+                    charts_rendered += 1
+            
+            # Then extract and render all charts from content (handles multiple charts)
+            # This will find additional charts not in msg.chart_path
+            charts_rendered += render_charts_from_message(msg.content, max_charts=4)
 
             # Timing info
             timing = _format_timing(msg)

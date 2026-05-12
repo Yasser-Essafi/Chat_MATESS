@@ -42,6 +42,7 @@ import sys
 import re
 import threading
 import time
+import unicodedata
 from typing import Optional, List, Dict
 from functools import wraps
 
@@ -344,6 +345,27 @@ _FR_MARKERS = frozenset({
 })
 
 
+_FR_MARKERS = frozenset(set(_FR_MARKERS) | {
+    "et", "en", "meme", "même", "chose", "seulement", "bonjour",
+    "bonsoir", "salut", "merci", "arrivees", "arrivées", "nuitees",
+    "nuitées", "hebergement", "hébergement", "prevision", "prévision",
+    "annee", "année", "fevrier", "février",
+})
+
+_EN_MARKERS = frozenset({
+    "the", "a", "an", "is", "are", "what", "which", "who", "where",
+    "when", "why", "how", "please", "thanks", "thank", "hello", "hi",
+    "forecast", "predict", "prediction", "tourists", "arrivals", "nights",
+    "hotel", "region", "year", "month", "compare", "show", "give",
+})
+
+
+def _ascii_words(text: str) -> set:
+    norm = unicodedata.normalize("NFKD", text or "")
+    norm = "".join(ch for ch in norm if not unicodedata.combining(ch))
+    return set(re.findall(r"\b\w+\b", norm.lower()))
+
+
 def detect_language(text: str) -> str:
     """
     Detect the language of a text string using heuristics.
@@ -361,6 +383,13 @@ def detect_language(text: str) -> str:
     # Arabic script detection
     if any("\u0600" <= ch <= "\u06FF" for ch in text):
         return "ar"
+
+    words = _ascii_words(text)
+    fr_count = len(words & _FR_MARKERS)
+    en_count = len(words & _EN_MARKERS)
+    if en_count >= 2 and en_count > fr_count:
+        return "en"
+    return "fr"
 
     # French word-boundary detection
     words = set(re.findall(r"\b\w+\b", text.lower()))

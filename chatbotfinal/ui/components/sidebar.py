@@ -28,12 +28,12 @@ def _format_date(iso_str: str) -> str:
 
 
 def _get_agent_emoji(agent: Optional[str]) -> str:
-    """Get emoji for agent type."""
+    """Get label for agent type."""
     return {
-        "normal": "🏛️",
-        "researcher": "🔍",
-        "analytics": "📊",
-    }.get(agent, "💬")
+        "normal": "G",
+        "researcher": "R",
+        "analytics": "A",
+    }.get(agent, "?")
 
 
 def _safe_reset_agents():

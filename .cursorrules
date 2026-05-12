@@ -1,0 +1,53 @@
+# Lessons
+
+- PowerShell does not support `&&` — use `;` or write a .bat/.py script for multi-command sequences.
+- The index.html file contains Unicode curly quotes (e.g. `'` in French text like "l'agent"). Direct StrReplace fails on these — use a Python helper script instead.
+- `_format_success` and `_extract_text` are instance methods on `DataAnalyticsAgent` — cannot be called as classmethod in tests.
+- When stripping NOTE lines from LLM response text, do the NOTE stripping BEFORE stripping table names, otherwise the keywords that trigger NOTE removal are already gone.
+- `server.py` had NO logger import — used raw `print()` and `traceback.print_exc()` everywhere. Now uses `get_logger("server")`.
+- The `startProgress` fake timer in `index.html` pushes hardcoded stages every 900ms — real trace comes from the server via `result.trace` array.
+- Prediction keywords in `_classify_instant` must use accent-normalized matching (`_norm_text`) because French users may type without accents (e.g., "previsions" vs "prévisions").
+- In `_classify_instant`, follow-up pinning must run BEFORE years-outside-range check, otherwise "Et pour 2028?" after a prediction turn gets hijacked to researcher.
+- Layer 2 LLM override (analytics → researcher for future years) must check for prediction intent first — otherwise the prediction agent is effectively dead.
+- Analytics KPI fast-path (try_official_kpi_answer, kpi_cache.try_answer) must append to conversation_history before returning, or follow-up context is lost.
+- Classifier cache key must include conversation_id to avoid cross-conversation pollution.
+- When passing context to PredictionAgent, use actual_pred_message (with history block) not bare user_message — the agent strips and parses them separately.
+
+# Scratchpad
+
+## UX Overhaul — COMPLETED
+[X] Phase 1: Fast greeting routing (compound greetings skip LLM classifier)
+[X] Phase 2: Remove all emojis from agent names, icons, greetings
+[X] Phase 3: Replace fake Journal d'analyse with real server trace
+[X] Phase 4: Strip internal table names, file paths, chart lines from responses
+[X] Phase 5: Interleaved narrative + charts (GRAPHIQUE_N markers)
+[X] Phase 6: Full structured logging (logger replaces print everywhere)
+
+## Bug Fixes (Post-Overhaul)
+[X] Bug: Charts not showing — chart_paths not propagated after removing Chart: lines
+    Root cause: analytics agent returned string, not dict; chart paths were extracted via regex from text, but text no longer has Chart: lines.
+    Fix: Added `last_chart_paths` attribute to DataAnalyticsAgent; orchestrator reads it after calling the agent.
+[X] Bug: Journal d'analyse shows "Analyse en cours" — trace steps actually ARE stored correctly but user may have been viewing stale cached page or loading state
+    Verified: stored chat_history JSON has 6 trace steps with status "done". Frontend should render them.
+[X] Bug: Internal table names (gld_dim_*) leak into stored messages — _sanitize_response was only applied to HTTP response, not to persisted messages.
+    Fix: Applied _sanitize_response in _assistant_message_from_result before storing.
+
+## Follow-Up Flow Fixes — COMPLETED
+[X] Bug 1/8/9: Prediction agent never triggered — reordered _classify_instant (prediction keywords > follow-up pinning > years-outside-range), added accent normalization, fixed Layer 2 override
+[X] Bug 2: Prediction context blind — orchestrator now passes actual_pred_message with history; PredictionAgent._resolve_implicit_refs extracts voie context
+[X] Bug 3: Analytics KPI fast-path skipped history — both try_official_kpi_answer and kpi_cache.try_answer now append to conversation_history
+[X] Bug 4: Classifier cache cross-pollution — cache key now includes conversation_id
+[X] Bug 5: conversation_log truncation increased from 500 → 800 chars
+[X] Bug 7: Removed unreachable dead code blocks in server.py (/api/chat and /api/insights)
+All 22 unit tests + 11 live integration tests pass.
+
+## Agentic Flow Redesign — Plan-Execute-Review-Humanize — COMPLETED
+[X] Phase 1: Triage Node (orchestration/triage.py) — complexity assessment, deterministic fast-path + LLM fallback
+[X] Phase 2: Planner Node (orchestration/planner.py) — structured plan generation with LLM + deterministic fallback
+[X] Phase 3: Executor Node (orchestration/executor.py) — tool-calling loop wrapping SQL/search/RAG/prediction/chart
+[X] Phase 4: Reviewer Node (orchestration/reviewer.py) — reflection loop with heuristic + LLM quality check
+[X] Phase 5: Humanizer End-Node (orchestration/humanizer.py) — warm conversational tone for all responses
+[X] Phase 6: Graph Runner (orchestration/graph.py) + wired into orchestrator._route_internal via USE_NEW_FLOW flag
+[X] Phase 7: 51 unit tests (tests/test_orchestration_flow.py) — all passing
+Feature flag: USE_NEW_FLOW=true (default) in settings.py enables new flow; false falls back to legacy.
+Key insight: smart_search uses analysis_type param (not search_type). ResearcherAgent attrs: self.searcher, self.rag.

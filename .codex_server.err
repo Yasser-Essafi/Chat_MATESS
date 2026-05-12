@@ -1,0 +1,104 @@
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.100.137:5000
+Press CTRL+C to quit
+23:19:14 │ INFO    │ Shared AzureOpenAI client created (endpoint: https://llm-mtaess.openai.azure.com/)
+23:19:14 │ INFO    │ Assistant Général STATOUR initialized (temp=1.0, max_tokens=1024, reasoning_model=True)
+23:19:14 │ INFO    │ Assistant Général STATOUR ready
+23:19:14 │ INFO    │ Chercheur Tourisme STATOUR initialized (temp=1.0, max_tokens=2048, reasoning_model=True)
+23:19:14 │ INFO    │ Initializing RAG knowledge base...
+23:19:15 │ INFO    │ ChromaDB initialized (path: C:\Users\hamzaELFAKIR\OneDrive - ALEXSYS SOLUTIONS\Bureau\ChatbotTourism\Chat_MATESS\chatbotfinal\knowledge_base\vectorstore)
+23:19:16 │ INFO    │ Vectorstore loaded: 128 chunks
+23:19:16 │ INFO    │ Initializing web search...
+23:19:16 │ INFO    │ Search backend: Tavily
+23:19:16 │ INFO    │ Exa.ai search initialized
+23:19:16 │ INFO    │ Exa.ai semantic search: available
+23:19:16 │ INFO    │ Chercheur Tourisme STATOUR ready (RAG=✅, Web=✅, Exa=✅)
+23:19:16 │ INFO    │ Cataloging Fabric Gold metadata
+23:19:22 │ INFO    │ DBLayer: Connected — Fabric Lakehouse Gold (LH_03_MTAESS_GOLD@4ql4saucbfcutnpn6ladpjqh5q-ycdaqpdqiubuxb5fdqh3gzxnuu, schema=dbo_GOLD, driver=ODBC Driver 18 for SQL Server)
+23:19:22 │ INFO    │ Fabric: cataloguing 5 table(s) — schemas only, no bulk load
+23:19:28 │ INFO    │   ✅ Catalogued dbo_GOLD.fact_statistiques_apf: 9 cols, ~101,519 rows
+23:19:37 │ INFO    │   ✅ Catalogued dbo_GOLD.fact_statistiqueshebergementnationaliteestimees: 9 cols, ~7,310,986 rows
+23:19:43 │ INFO    │   ✅ Catalogued dbo_GOLD.gld_dim_categories_classements: 8 cols, ~61 rows
+23:19:55 │ INFO    │   ✅ Catalogued dbo_GOLD.gld_dim_etablissements_hebergements: 20 cols, ~5,843 rows
+23:19:58 │ INFO    │   ✅ Catalogued dbo_GOLD.gld_dim_delegations: 4 cols, ~26 rows
+23:20:09 │ INFO    │ KPI cache built: 5 years, years=[2019, 2023, 2024, 2025, 2026]
+23:20:09 │ INFO    │ KPI cache built from APF (101519 rows via SQL)
+23:20:09 │ INFO    │ Search backend: Tavily
+23:20:09 │ INFO    │ Exa.ai search initialized
+23:20:09 │ INFO    │ Exa.ai semantic search: available
+23:20:09 │ INFO    │ Web search: available
+23:20:09 │ INFO    │ Analyste de Données STATOUR initialized (temp=1.0, max_tokens=8000, reasoning_model=True)
+23:20:09 │ INFO    │ Analyste de Données STATOUR ready — 5 dataset(s), active: fact_statistiques_apf
+23:20:09 │ INFO    │ CAGR calculation: excluded partial year 2026 (only 2 months available). Using 2019→2025 window instead.
+23:20:09 │ INFO    │ Search backend: Tavily
+23:20:09 │ INFO    │ Exa.ai search initialized
+23:20:09 │ INFO    │ Exa.ai semantic search: available
+23:20:09 │ INFO    │ Prévisionniste STATOUR initialized — 5 years of data (2019–2026)
+23:20:09 │ INFO    │ Hébergement year range: 2019–2026
+23:20:09 │ INFO    │ Orchestrator ready — 5 datasets, year range: 2019–2026, prediction=ready
+23:20:09 │ INFO    │ Loaded 151 conversations from history
+127.0.0.1 - - [09/May/2026 23:20:30] "GET /api/health HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:20:45] "GET /api/health HTTP/1.1" 200 -
+23:20:55 │ INFO    │ New conversation created: 6c61a53a
+127.0.0.1 - - [09/May/2026 23:20:55] "POST /api/conversations HTTP/1.1" 200 -
+23:21:03 │ INFO    │ Executing analysis code...
+23:21:07 │ INFO    │ Routed 'Cree un graphique des nuitees par ville en 2024 av' → analytics [classify=0ms, total=10634ms]
+127.0.0.1 - - [09/May/2026 23:21:08] "POST /api/chat HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:27:15] "POST /api/chat/stream HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:15] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:17] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:17] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+23:27:36 │ INFO    │ Executing analysis code...
+23:27:44 │ INFO    │ Routed 'Si possible de me creer un graphique où tu ajoute ' → analytics [classify=930ms, total=27272ms]
+127.0.0.1 - - [09/May/2026 23:27:44] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:44] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:44] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:44] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:27:44] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:27:44] "GET /charts/chat_chart_20260509_232744_594243.html HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:27:46] "GET /api/readiness HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:34:30] "GET / HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:34:31] "GET /assets/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:34:31] "GET /assets/alexsys-logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:34:31] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:34:31] "POST /api/conversations/9281a5b6/activate HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:34:31] "GET /api/conversations/9281a5b6 HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:34:31] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:34:34] "GET /api/readiness HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:34:35] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:34:35] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:34:35] "GET /charts/chat_chart_20260509_232744_594243.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:42:32] "GET / HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:42:32] "GET /assets/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:42:32] "GET /assets/alexsys-logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:42:32] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:42:32] "POST /api/conversations/9281a5b6/activate HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:42:33] "GET /api/conversations/9281a5b6 HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:42:33] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:42:34] "GET /api/readiness HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:42:34] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:42:34] "GET /charts/chat_chart_20260509_232744_594243.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:42:34] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:51:53] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:51:53] "GET /assets/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:51:53] "GET /assets/alexsys-logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:51:53] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:51:53] "POST /api/conversations/9281a5b6/activate HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:51:53] "GET /api/conversations/9281a5b6 HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:51:53] "GET /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:51:55] "GET /api/readiness HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:51:55] "GET /charts/chat_chart_20260509_231433_810219.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:51:55] "GET /charts/chat_chart_20260509_231310_650841.html HTTP/1.1" 304 -
+127.0.0.1 - - [09/May/2026 23:51:55] "GET /charts/chat_chart_20260509_232744_594243.html HTTP/1.1" 304 -
+23:53:59 │ INFO    │ New conversation created: 10b61e19
+127.0.0.1 - - [09/May/2026 23:53:59] "POST /api/conversations HTTP/1.1" 200 -
+127.0.0.1 - - [09/May/2026 23:53:59] "GET /api/conversations HTTP/1.1" 200 -

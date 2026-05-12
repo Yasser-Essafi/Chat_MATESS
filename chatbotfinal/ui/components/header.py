@@ -33,10 +33,9 @@ def render_header():
             conv = session_mgr.get_active_conversation()
             if conv and conv.messages:
                 agent = conv.get_last_agent()
-                icons = {"normal": "🏛️", "researcher": "🔍", "analytics": "📊"}
                 st.markdown(
                     f"<div style='text-align:right; font-size:0.8rem; color:#A0A4B0;'>"
-                    f"{icons.get(agent, '🤖')} {len(conv.messages)} msgs</div>",
+                    f"{len(conv.messages)} msgs</div>",
                     unsafe_allow_html=True,
                 )
 

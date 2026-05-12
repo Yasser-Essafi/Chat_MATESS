@@ -72,61 +72,61 @@ _THANKS = frozenset({
 # Greeting responses by language
 _GREETING_RESPONSES = {
     "fr": (
-        "Bonjour ! 👋 Je suis l'Assistant Général de STATOUR, "
+        "Bonjour ! Je suis l'Assistant Général de STATOUR, "
         "la plateforme statistique du Ministère du Tourisme, "
         "de l'Artisanat et de l'Économie Sociale du Maroc.\n\n"
         "Je peux vous aider avec :\n"
-        "• 📊 Des questions sur les données touristiques\n"
-        "• 🔍 Des recherches sur l'actualité du tourisme\n"
-        "• ℹ️ Des explications sur la plateforme STATOUR\n\n"
+        "- Des questions sur les données touristiques\n"
+        "- Des recherches sur l'actualité du tourisme\n"
+        "- Des explications sur la plateforme STATOUR\n\n"
         "Comment puis-je vous aider ?"
     ),
     "en": (
-        "Hello! 👋 I'm the General Assistant of STATOUR, "
+        "Hello! I'm the General Assistant of STATOUR, "
         "the statistical platform of Morocco's Ministry of Tourism.\n\n"
         "I can help you with:\n"
-        "• 📊 Tourism data questions\n"
-        "• 🔍 Tourism news and research\n"
-        "• ℹ️ STATOUR platform explanations\n\n"
+        "- Tourism data questions\n"
+        "- Tourism news and research\n"
+        "- STATOUR platform explanations\n\n"
         "How can I help you?"
     ),
     "ar": (
-        "مرحبا! 👋 أنا المساعد العام لمنصة ستاتور، "
+        "مرحبا! أنا المساعد العام لمنصة ستاتور، "
         "المنصة الإحصائية لوزارة السياحة المغربية.\n\n"
         "يمكنني مساعدتك في:\n"
-        "• 📊 أسئلة حول بيانات السياحة\n"
-        "• 🔍 أخبار وأبحاث السياحة\n"
-        "• ℹ️ شرح منصة ستاتور\n\n"
+        "- أسئلة حول بيانات السياحة\n"
+        "- أخبار وأبحاث السياحة\n"
+        "- شرح منصة ستاتور\n\n"
         "كيف يمكنني مساعدتك؟"
     ),
 }
 
 _FAREWELL_RESPONSES = {
     "fr": (
-        "Au revoir ! 👋 N'hésitez pas à revenir si vous avez "
-        "d'autres questions sur le tourisme marocain. Bonne journée ! 🇲🇦"
+        "Au revoir ! N'hésitez pas à revenir si vous avez "
+        "d'autres questions sur le tourisme marocain. Bonne journée !"
     ),
     "en": (
-        "Goodbye! 👋 Feel free to come back if you have "
-        "more questions about Moroccan tourism. Have a great day! 🇲🇦"
+        "Goodbye! Feel free to come back if you have "
+        "more questions about Moroccan tourism. Have a great day!"
     ),
     "ar": (
-        "مع السلامة! 👋 لا تتردد في العودة إذا كان لديك "
-        "أسئلة أخرى حول السياحة المغربية. يوم سعيد! 🇲🇦"
+        "مع السلامة! لا تتردد في العودة إذا كان لديك "
+        "أسئلة أخرى حول السياحة المغربية. يوم سعيد!"
     ),
 }
 
 _THANKS_RESPONSES = {
     "fr": (
-        "Je vous en prie ! 😊 N'hésitez pas si vous avez "
+        "Je vous en prie ! N'hésitez pas si vous avez "
         "d'autres questions. Je suis là pour vous aider."
     ),
     "en": (
-        "You're welcome! 😊 Don't hesitate if you have "
+        "You're welcome! Don't hesitate if you have "
         "more questions. I'm here to help."
     ),
     "ar": (
-        "على الرحب والسعة! 😊 لا تتردد إذا كان لديك "
+        "على الرحب والسعة! لا تتردد إذا كان لديك "
         "أسئلة أخرى. أنا هنا لمساعدتك."
     ),
 }

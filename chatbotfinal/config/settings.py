@@ -155,6 +155,17 @@ SEARCH_CACHE_MAX_SIZE = 200
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Orchestration Flow
+# ══════════════════════════════════════════════════════════════════════════════
+# When True, uses the new Plan-Execute-Review-Humanize pipeline.
+# When False, uses the legacy classify-and-dispatch monolithic orchestrator.
+USE_NEW_FLOW = os.getenv("USE_NEW_FLOW", "true").strip().lower() in ("1", "true", "yes")
+
+# Maximum re-plan attempts when reviewer finds gaps (prevent infinite loops)
+MAX_REPLAN_ATTEMPTS = 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Execution Safety
 # ══════════════════════════════════════════════════════════════════════════════
 EXEC_TIMEOUT_SECONDS = 30    # Max time for analytics code execution
@@ -172,15 +183,19 @@ ACTIVE_AGENTS = {
     "normal": True,
     "researcher": True,
     "analytics": True,
+    "executive_insight": True,
+    "human_advisor": True,
 }
 
 # Agent display names
 AGENT_NAMES = {
-    "orchestrator": "🎯 Orchestrateur STATOUR",
-    "normal": "🏛️ Assistant Général",
-    "researcher": "🔍 Chercheur Tourisme",
-    "analytics": "📊 Analyste de Données",
-    "prediction": "🔮 Prévisionniste STATOUR",
+    "orchestrator": "Orchestrateur STATOUR",
+    "normal": "Assistant Général",
+    "researcher": "Chercheur Tourisme",
+    "analytics": "Analyste de Données",
+    "prediction": "Prévisionniste STATOUR",
+    "executive_insight": "Analyste Exécutif",
+    "human_advisor": "Conseiller Tourisme",
 }
 
 

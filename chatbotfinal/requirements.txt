@@ -5,6 +5,10 @@ langchain-openai
 langchain-community
 langgraph
 
+# Flask API
+Flask
+Flask-Cors
+
 # MCP Protocol
 mcp
 
@@ -43,3 +47,6 @@ streamlit
 
 # Utilities
 tiktoken
+
+# Testing
+pytest
