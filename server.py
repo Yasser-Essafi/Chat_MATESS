@@ -355,6 +355,43 @@ def readiness():
         return jsonify({"ready": False, "error": "readiness_failed", "request_id": rid}), 500
 
 
+def _public_readiness_payload(readiness: dict) -> dict:
+    fabric = readiness.get("fabric") or {}
+    latest = readiness.get("latest_data") or {}
+    return {
+        "ready": bool(readiness.get("ready")),
+        "checked_at": readiness.get("checked_at"),
+        "fabric": {
+            "connected": bool(fabric.get("connected")),
+            "table_count": len(fabric.get("tables") or {}),
+        },
+        "latest_data": latest,
+        "rag": readiness.get("rag") or {"available": False, "chunks": 0},
+        "search": readiness.get("search") or {"available": False, "exa_available": False},
+        "blockers": readiness.get("blockers") or [],
+    }
+
+
+def _public_readiness_snapshot() -> dict:
+    from utils.mvp_services import get_readiness
+
+    return _public_readiness_payload(get_readiness(_get_orch()))
+
+
+@app.route("/api/public/readiness")
+def public_readiness():
+    """Public readiness summary for the frontend status bar.
+
+    The detailed diagnostics remain behind /api/readiness with the admin token.
+    """
+    try:
+        return jsonify(_public_readiness_snapshot())
+    except Exception:
+        rid = getattr(g, "request_id", "?")
+        logger.debug("Exception detail:", exc_info=True)
+        return jsonify({"ready": False, "error": "readiness_failed", "request_id": rid}), 500
+
+
 @app.route("/api/dashboard/summary")
 def dashboard_summary():
     """Return executive dashboard KPI cards, charts, signals and data freshness."""

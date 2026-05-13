@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ui.state.session import Conversation, Message
 from agents.orchestrator import ConversationRuntimeState, Orchestrator
 from orchestration.nodes import build_default_registry
+import server as server_module
 from server import _CHARTS_DIR, _resp, app, extract_chart_paths
 
 
@@ -99,6 +100,26 @@ def test_serve_chart_uses_runtime_charts_dir():
     finally:
         if os.path.exists(path):
             os.remove(path)
+
+
+def test_public_readiness_does_not_require_admin(monkeypatch):
+    monkeypatch.setattr(
+        server_module,
+        "_public_readiness_snapshot",
+        lambda: {
+            "ready": True,
+            "fabric": {"connected": True, "table_count": 5},
+            "rag": {"available": True, "chunks": 124},
+            "search": {"available": True, "exa_available": True},
+            "blockers": [],
+        },
+    )
+
+    response = app.test_client().get("/api/public/readiness")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ready"] is True
+    assert payload["fabric"]["table_count"] == 5
 
 
 def test_orchestrator_deliverable_detection_without_init():
