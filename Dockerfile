@@ -34,4 +34,4 @@ RUN mkdir -p /home/statour/charts /home/statour/reports /home/statour/logs /home
 
 EXPOSE 8000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "4", "--timeout", "240", "server:create_app()"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "6", "--timeout", "300", "server:create_app()"]

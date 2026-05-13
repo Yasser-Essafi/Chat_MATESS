@@ -68,6 +68,7 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
 def create_app() -> Flask:
     """Return the configured Flask app for WSGI servers and tests."""
+    _start_background_warmup()
     return app
 
 # ── In-memory per-IP rate limiter (dev-grade — for multi-process use Redis) ──
@@ -266,6 +267,9 @@ def _internal_error(_e):
 _orchestrator = None
 _session_manager = None
 _init_lock = threading.Lock()
+_warmup_lock = threading.Lock()
+_warmup_started = False
+_warmup_done = False
 
 
 def _get_orch():
@@ -286,6 +290,37 @@ def _get_mgr():
                 from ui.state.session import SessionManager
                 _session_manager = SessionManager()
     return _session_manager
+
+
+def _start_background_warmup() -> None:
+    """Initialize the heavy singletons without blocking health/readiness."""
+    global _warmup_started, _warmup_done
+    if _warmup_started or _warmup_done:
+        return
+    with _warmup_lock:
+        if _warmup_started or _warmup_done:
+            return
+        _warmup_started = True
+
+    def _warmup():
+        global _warmup_done
+        try:
+            orch = _get_orch()
+            _get_mgr()
+            try:
+                from utils.mvp_services import get_readiness
+
+                get_readiness(orch)
+            except Exception:
+                logger.debug("Readiness warmup skipped", exc_info=True)
+            _warmup_done = True
+            logger.info("Background warmup complete")
+        except Exception as exc:
+            with _warmup_lock:
+                globals()["_warmup_started"] = False
+            logger.warning("Background warmup failed: %s", exc)
+
+    threading.Thread(target=_warmup, daemon=True, name="statour-warmup").start()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -319,6 +354,7 @@ def serve_assets(filename):
 
 @app.route("/api/health")
 def health():
+    _start_background_warmup()
     return jsonify({"status": "ok", "platform": "Assistant Tourisme Maroc", "ts": datetime.now().isoformat()})
 
 
@@ -425,6 +461,7 @@ def public_readiness():
 
     The detailed diagnostics remain behind /api/readiness with the admin token.
     """
+    _start_background_warmup()
     try:
         return jsonify(_public_readiness_snapshot())
     except Exception:
@@ -1815,17 +1852,7 @@ if __name__ == "__main__":
     logger.info("=" * 58)
 
     logger.info("Initialisation du systeme en arriere-plan...")
-
-    def _background_warmup():
-        try:
-            _get_orch()
-            _get_mgr()
-            logger.info("Systeme pret!")
-        except Exception as exc:
-            logger.warning("Avertissement lors de l'init: %s", exc)
-            logger.info("Le systeme reessaiera a la premiere requete.")
-
-    threading.Thread(target=_background_warmup, daemon=True).start()
+    _start_background_warmup()
 
     logger.info("Serveur disponible sur: http://localhost:5000")
     logger.info("Appuyez sur Ctrl+C pour arreter.")
