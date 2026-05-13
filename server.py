@@ -373,9 +373,50 @@ def _public_readiness_payload(readiness: dict) -> dict:
 
 
 def _public_readiness_snapshot() -> dict:
-    from utils.mvp_services import get_readiness
+    from config.settings import (
+        AZURE_OPENAI_API_KEY,
+        BRAVE_API_KEY,
+        DOCUMENTS_DIR,
+        EXA_API_KEY,
+        FABRIC_ENABLED,
+        FABRIC_TABLES,
+        TAVILY_API_KEY,
+        VECTORSTORE_DIR,
+    )
 
-    return _public_readiness_payload(get_readiness(_get_orch()))
+    fabric_ok = bool(FABRIC_ENABLED and FABRIC_TABLES)
+    search_ok = bool(TAVILY_API_KEY or EXA_API_KEY or BRAVE_API_KEY)
+    ai_ok = bool(AZURE_OPENAI_API_KEY)
+    rag_ok = False
+    try:
+        rag_ok = (
+            os.path.isdir(VECTORSTORE_DIR) and any(os.scandir(VECTORSTORE_DIR))
+        ) or (
+            os.path.isdir(DOCUMENTS_DIR)
+            and any(name.lower().endswith(".md") for name in os.listdir(DOCUMENTS_DIR))
+        )
+    except Exception:
+        rag_ok = False
+
+    blockers = []
+    if not fabric_ok:
+        blockers.append("Fabric non configuré")
+    if not ai_ok:
+        blockers.append("Azure OpenAI non configuré")
+    if not search_ok:
+        blockers.append("Recherche non configurée")
+    if not rag_ok:
+        blockers.append("Base documentaire non détectée")
+
+    return {
+        "ready": fabric_ok and ai_ok and search_ok and rag_ok,
+        "checked_at": datetime.now().isoformat(),
+        "fabric": {"connected": fabric_ok, "table_count": len(FABRIC_TABLES)},
+        "latest_data": {},
+        "rag": {"available": rag_ok, "chunks": None},
+        "search": {"available": search_ok, "exa_available": bool(EXA_API_KEY)},
+        "blockers": blockers,
+    }
 
 
 @app.route("/api/public/readiness")

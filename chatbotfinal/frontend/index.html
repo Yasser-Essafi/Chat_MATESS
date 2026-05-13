@@ -714,10 +714,11 @@
       async refreshReadiness() {
         try {
           const data = await this.fetchJson(API.readiness);
+          const ragChunks = Number(data.rag?.chunks || 0);
           const pills = [
             ['Fabric', data.fabric?.connected],
             ['Recherche', data.search?.available],
-            ['RAG ' + (data.rag?.chunks || 0), data.rag?.available]
+            [ragChunks > 0 ? 'RAG ' + ragChunks : 'RAG', data.rag?.available]
           ];
           document.getElementById('statusBar').innerHTML = pills.map(([label, ok]) =>
             `<span class="pill ${ok ? 'ok' : 'warn'}">${this.esc(label)}</span>`
