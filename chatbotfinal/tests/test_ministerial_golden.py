@@ -359,3 +359,21 @@ print(df["Part (%)"].round(1).tolist())
 
     assert result["error"] is None
     assert "[80.0, 20.0]" in result["output"]
+
+
+def test_sandbox_executes_inside_worker_thread():
+    import queue
+    import threading
+
+    results = queue.Queue()
+
+    def worker():
+        results.put(execute_code_safe('print("ok")', {}, timeout_seconds=5))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=10)
+
+    result = results.get_nowait()
+    assert result["error"] is None
+    assert "ok" in result["output"]

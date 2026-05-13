@@ -30,6 +30,7 @@ import re
 import glob
 import signal
 import contextlib
+import threading
 import unicodedata
 from io import StringIO
 from datetime import datetime
@@ -265,7 +266,7 @@ def execute_code_safe(
         - Blocked keyword check
         - Restricted __builtins__ (no open, eval, exec, etc.)
         - Custom safe_print replaces print (thread-safe, no sys.stdout swap)
-        - Execution timeout via SIGALRM (Unix) or no timeout (Windows)
+        - Execution timeout via SIGALRM only when running on the main thread
         - DataFrame copies prevent mutation of source data
 
     Args:
@@ -305,7 +306,10 @@ def execute_code_safe(
     exec_globals["__builtins__"] = SAFE_BUILTINS.copy()
 
     # ── Set timeout (Unix only) ──
-    has_alarm = hasattr(signal, "SIGALRM")
+    has_alarm = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
     old_handler = None
 
     if has_alarm:
