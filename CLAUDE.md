@@ -102,7 +102,7 @@ python chatbotfinal/rebuild_knowledge_base.py      # Rebuild RAG vectorstore aft
 - `gld_dim_etablissements_hebergements` ON `CAST(etablissement_id_genere AS VARCHAR) = eht_id` → `etablissement_libelle_fr`, `capacite_nbr_chambre_actuel`, `delegation_id`
 - `gld_dim_delegations` ON `delegation_bk = delegation_id` → `delegation_name`
 
-**Coverage**: data from STDN (télédéclarations) + STATOUR (manual) + Estimatif model
+**Coverage**: données d'hébergement estimées + STATOUR (manual)
 
 ---
 
@@ -130,7 +130,7 @@ The word **"arrivées"** means TWO completely different things:
 
 - `date_stat` = ALWAYS 1st of month — monthly data only, NO daily breakdown
 - Filter temporally with: `WHERE YEAR(date_stat) = 2025 AND MONTH(date_stat) = 7`
-- Partial year 2026: only Jan–Feb available — NEVER compare full-year 2026 with earlier full years
+- Partial year 2026: align comparisons to the months actually available in the relevant table — NEVER compare partial 2026 with earlier full years
 
 ### Rule 4: Key domain concepts
 
@@ -139,9 +139,8 @@ The word **"arrivées"** means TWO completely different things:
 | **MRE** | Marocains Résidant à l'Étranger — Moroccan diaspora returning home |
 | **TES** | Touristes Étrangers Séjournistes — Foreign non-Moroccan tourists |
 | **EHTC** | Établissements d'Hébergement Touristique Classés (~5000 classified hotels) |
-| **STDN** | Système de Télé-déclaration des Nuitées — electronic hotel declarations |
-| **STATOUR** | Manual entry platform used by regional delegations (backup if STDN insufficient) |
-| **Estimatif** | Statistical model estimating nuitées for non-declaring establishments (based on provincial average occupancy rate × available rooms × days) |
+| **STATOUR** | Manual entry platform used by regional delegations |
+| **Données d'hébergement estimées** | Arrivées hôtelières, nuitées and DMS for classified accommodation |
 | **TO** | Taux d'Occupation = occupied rooms / available rooms × 100 |
 | **Opération Marhaba** | Annual June–September MRE return program (causes maritime arrival peaks) |
 | **DMS** | Durée Moyenne de Séjour (average length of stay) |
@@ -235,7 +234,7 @@ NEVER modify knowledge_base/vectorstore/ (binary ChromaDB — rebuild_knowledge_
 NEVER read, display, or log .env content
 NEVER use `pool_pre_ping=False` on Fabric engine — always pool_pre_ping=True
 NEVER use `max_tokens` parameter — use `max_completion_tokens` for reasoning models
-NEVER compare full-year 2026 with full-year 2025 — 2026 has only Jan-Feb data
+NEVER compare a partial 2026 period with a full earlier year — align months dynamically by table coverage
 NEVER use the Responses API `web_search` tool for gpt-5-mini — not yet supported on Azure
 NEVER use Azure AI Agents Bing Grounding with gpt-5-mini — explicitly excluded for gpt-5 series
 ```
@@ -287,7 +286,6 @@ SEARCH_BACKEND=auto       # auto | tavily | brave
 |------|-----------|-------|
 | APF | Arrivées aux Postes Frontières | Border arrivals from DGSN (police) |
 | STATOUR | Plateforme de saisie statistiques tourisme | Manual hotel declaration platform |
-| STDN | Système Télé-Déclaration Nuitées | Electronic hotel night declarations |
 | MRE | Marocains Résidant à l'Étranger | Moroccan diaspora (~5M people) |
 | TES | Touristes Étrangers Séjournistes | Foreign non-Moroccan tourists |
 | EHTC | Établissements Hébergement Touristique Classés | ~5000 classified hotels |
@@ -298,5 +296,5 @@ SEARCH_BACKEND=auto       # auto | tavily | brave
 | sql() | Sandbox SQL function | Runs T-SQL against Fabric (NOT df, NOT read_sql) |
 | TO | Taux d'Occupation | Occupancy rate metric |
 | DMS | Durée Moyenne de Séjour | Average length of stay |
-| Estimatif | Statistical estimation model | Fills gaps for non-declaring EHTC |
+| Données d'hébergement estimées | Accommodation fact table | Arrivées hôtelières, nuitées and DMS for EHTC |
 | Vision 2030 | Tourism target | 26M TES arrivals + 120Mrd MAD revenue |

@@ -547,7 +547,7 @@ Un indice > 100 signifie un mois supérieur à la moyenne. Un indice < 100 signi
 - **Été (Juil-Août)** : Pic MRE — la diaspora rentre pour les vacances d'été
 - **Printemps (Mars-Avril)** : Forte demande TES — climat idéal, Pâques
 - **Automne (Oct-Nov)** : 2e pic TES — saison culturelle, températures agréables
-- **Hiver (Jan-Fév)** : Creux relatif, sauf stations de ski et Marrakech
+- **Hiver (mois disponibles)** : Creux relatif, sauf stations de ski et Marrakech
 - **Ramadan** : Impact variable selon sa position dans le calendrier (mobile)
 
 ## Facteurs d'influence

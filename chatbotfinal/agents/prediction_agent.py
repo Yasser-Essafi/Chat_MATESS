@@ -307,7 +307,7 @@ class PredictionEngine:
         data. Falls back to _BASE_GROWTH when data is insufficient.
 
         Why exclude the latest partial year: APF data for the current year
-        often has only Jan-Feb. Including it as v1 in CAGR collapses the
+        often has only a partial current year. Including it as v1 in CAGR collapses the
         growth rate to ~0% (or negative), producing degenerate forecasts
         like "0.0%/an" seen in production.
         """
@@ -384,7 +384,7 @@ class PredictionEngine:
         """Return (last_year, total) from the DataFrame.
 
         complete_only=True excludes the latest partial year, which is critical
-        for APF forecasting because 2026 currently contains only Jan-Feb.
+        for APF forecasting because 2026 can be a partial year.
         """
         if "date_stat_year" not in self.df.columns or "total" not in self.df.columns:
             return (2024, 14_000_000)  # safe fallback

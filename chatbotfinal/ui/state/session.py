@@ -20,8 +20,11 @@ logger = get_logger("statour.ui.session")
 
 # History persistence directory
 HISTORY_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "chat_history"
+    os.environ.get(
+        "STATOUR_RUNTIME_ROOT",
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ),
+    os.environ.get("STATOUR_CHAT_HISTORY_SUBDIR", "chat_history"),
 )
 os.makedirs(HISTORY_DIR, exist_ok=True)
 

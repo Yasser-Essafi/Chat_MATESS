@@ -70,12 +70,12 @@ FABRIC_ENABLED = bool(FABRIC_SQL_ENDPOINT and FABRIC_DATABASE
 # Paths
 # ══════════════════════════════════════════════════════════════════════════════
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-KNOWLEDGE_BASE_DIR = os.path.join(PROJECT_ROOT, "knowledge_base")
+DATA_DIR = os.getenv("STATOUR_DATA_DIR", os.path.join(PROJECT_ROOT, "data"))
+KNOWLEDGE_BASE_DIR = os.getenv("STATOUR_KNOWLEDGE_BASE_DIR", os.path.join(PROJECT_ROOT, "knowledge_base"))
 DOCUMENTS_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "documents")
-VECTORSTORE_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "vectorstore")
-CHARTS_DIR = os.path.join(PROJECT_ROOT, "charts")
-LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+VECTORSTORE_DIR = os.getenv("STATOUR_VECTORSTORE_DIR", os.path.join(KNOWLEDGE_BASE_DIR, "vectorstore"))
+CHARTS_DIR = os.getenv("STATOUR_CHARTS_DIR", os.path.join(PROJECT_ROOT, "charts"))
+LOGS_DIR = os.getenv("STATOUR_LOGS_DIR", os.path.join(PROJECT_ROOT, "logs"))
 APF_DATA_PATH = os.path.join(DATA_DIR, "apf_data.xlsx")
 
 # Ensure directories exist at import time
@@ -310,11 +310,10 @@ PROCESSUS DE RECHERCHE :
 CONNAISSANCE MÉTIER MTAESS :
 - APF = Arrivées aux Postes Frontières (données DGSN, mensuelles)
 - EHTC = ~5000 Établissements d'Hébergement Touristique Classés
-- STDN = Télédéclarations électroniques des nuitées
 - STATOUR = Plateforme de saisie manuelle des délégations
 - MRE = Marocains Résidant à l'Étranger (~5M diaspora)
 - TES = Touristes Étrangers Séjournistes (non-marocains)
-- Estimatif = calcul statistique des nuitées pour établissements non-déclarants
+- Données d'hébergement estimées = arrivées hôtelières, nuitées et DMS des établissements classés
 - Opération Marhaba = programme annuel juin-sept pour accueil des MRE
 - Vision 2030 = objectif 26M arrivées TES + 120Mrd MAD recettes
 

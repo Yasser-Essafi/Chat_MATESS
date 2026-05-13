@@ -104,7 +104,7 @@ _ANALYTICS_MARKERS = re.compile(
     r"recettes|dms|durée\s*moyenne|"
     r"combien|quel\s*(?:est|nombre|total)|"
     r"données|statistiques|chiffres|stats|"
-    r"ehtc|stdn|télédéclar)",
+    r"ehtc)",
     re.IGNORECASE,
 )
 
@@ -145,7 +145,7 @@ _ANALYTICS_MARKERS_NORM = re.compile(
     r"(nuitees|arrivees|touristes?|tourisme|touristiqu|mre|tes|apf|"
     r"hebergement|hotel|occupation|recettes|dms|duree\s*moyenne|"
     r"combien|quel\s*(?:est|nombre|total)|donnees|statistiques|"
-    r"chiffres|stats|ehtc|stdn|teledeclar)",
+    r"chiffres|stats|ehtc)",
     re.IGNORECASE,
 )
 

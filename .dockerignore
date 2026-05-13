@@ -1,0 +1,28 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+chatbotfinal/.env
+
+# Local runtime outputs
+*.log
+server_*.log
+.codex_server*.out
+.codex_server*.err
+chatbotfinal/charts/
+chatbotfinal/reports/
+chatbotfinal/logs/
+chatbotfinal/chat_history/
+chatbotfinal/knowledge_base/vectorstore/
+
+# Local generated standalone charts/reports
+*.html
+!chatbotfinal/frontend/*.html
+!chatbotfinal/knowledge_base/**/*.html

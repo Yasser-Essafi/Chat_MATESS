@@ -10,7 +10,6 @@
 | MRE | Marocains Résidant à l'Étranger | ~5M personnes en diaspora |
 | TES | Touristes Étrangers Séjournistes | Non-marocains entrant au Maroc |
 | EHTC | Établissements Hébergement Touristique Classés | ~5000 établissements |
-| STDN | Système Télé-Déclaration Nuitées | Déclarations électroniques |
 | TO | Taux d'Occupation | Métrique clé hébergement |
 | DMS | Durée Moyenne de Séjour | nuitées/arrivées |
 | DGSN | Direction Générale Sûreté Nationale | Fournisseur données APF |

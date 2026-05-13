@@ -3,11 +3,11 @@
 > Généré le 2026-05-05 21:34
 
 ## Résumé global
-- **Période couverte** : Janvier 2019 → Février 2026
-- **Total arrivées (2023-2026)** : 54,407,143
-- **Total MRE** : 27,379,589 (50.3%)
-- **Total TES** : 27,027,554 (49.7%)
-- **Dernière donnée disponible** : February 2026 (Février 2026)
+- **Période couverte** : Janvier 2019 → Mars 2026
+- **Total arrivées (2023-2026)** : 56,003,855
+- **Total MRE** : 28,079,142 (50.1%)
+- **Total TES** : 27,924,713 (49.9%)
+- **Dernière donnée disponible** : Mars 2026
 
 ## Évolution annuelle
 
@@ -17,7 +17,7 @@
 | 2023 | 7,374,733 | 7,149,994 | 14,524,727 | 50.8% | 22,926 |
 | 2024 | 8,614,178 | 8,797,771 | 17,411,949 | 49.5% | 30,943 |
 | 2025 | 10,158,786 | 9,633,818 | 19,792,604 | 51.3% | 23,952 |
-| 2026 | 1,231,892 | 1,445,971 | 2,677,863 | 46.0% | 3,706 |
+| 2026 | 1,931,445 | 2,343,130 | 4,274,575 | 45.2% | partiel |
 
 ## Décomposition mensuelle 2025 (année complète)
 
@@ -43,16 +43,13 @@
 |------|-----|-----|-------|
 | Janvier 2026 | 633,677 | 671,328 | 1,305,005 |
 | Février 2026 | 598,215 | 774,643 | 1,372,858 |
+| Mars 2026 | 699,553 | 897,159 | 1,596,712 |
 
-> ⚠️ Les données 2026 disponibles s'arrêtent à **Février 2026**. Mars 2026 et au-delà ne sont pas encore dans le dataset.
+> ⚠️ Les données 2026 sont partielles. Toute comparaison doit aligner les mêmes mois disponibles.
 
-## Comparaison Jan-Fév (2024 / 2025 / 2026)
+## Comparaison mois disponibles
 
-| Période | MRE | TES | Total |
-|---------|-----|-----|-------|
-| Jan-Fév 2024 | 1,003,594 | 1,136,941 | 2,140,535 |
-| Jan-Fév 2025 | 1,275,149 | 1,386,225 | 2,661,374 |
-| Jan-Fév 2026 | 1,231,892 | 1,445,971 | 2,677,863 |
+Pour comparer 2026 avec 2025 ou 2024, relire Fabric et limiter toutes les années aux mois disponibles dans la table demandée.
 
 ## Top 10 pays de résidence (toutes années)
 

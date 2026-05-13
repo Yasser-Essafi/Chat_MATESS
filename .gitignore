@@ -14,6 +14,7 @@ chatbotfinal/.env
 chatbotfinal/charts/
 chatbotfinal/logs/
 chatbotfinal/chat_history/
+chatbotfinal/reports/
 
 # ── Binary / ChromaDB vector store ───────────────────────────
 chatbotfinal/knowledge_base/vectorstore/

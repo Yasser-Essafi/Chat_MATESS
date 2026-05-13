@@ -56,6 +56,7 @@ from utils.base_agent import (
 )
 from utils.logger import get_logger
 from utils.cache import SearchCache
+from utils.fabric_catalog import APF_SCOPE_LABEL, HEBERGEMENT_SCOPE_LABEL
 
 logger = get_logger("statour.orchestrator")
 
@@ -99,9 +100,15 @@ def _metric_context_metadata(text: str, agent_key: str) -> str:
         return "prediction"
     if agent_key == "researcher":
         return "research"
-    if "apf" in norm or "frontiere" in norm or re.search(r"\b(mre|tes)\b", norm):
+    if re.search(r"\bdms\b", norm) or "duree moyenne de sejour" in norm:
+        return "hebergement"
+    has_apf = "apf" in norm or "frontiere" in norm or re.search(r"\b(mre|tes)\b", norm)
+    has_hbg = any(k in norm for k in ["hotel", "hoteliere", "hebergement", "nuitee", "dms", "ehtc"])
+    if has_apf and has_hbg:
+        return "ambiguous"
+    if has_apf:
         return "apf"
-    if any(k in norm for k in ["hotel", "hoteliere", "hebergement", "nuitee", "dms", "stdn", "ehtc"]):
+    if has_hbg:
         return "hebergement"
     if "arrive" in norm:
         return "ambiguous"
@@ -236,7 +243,7 @@ _HEBERGEMENT_DOMAIN_KW = [
     "nuitée", "nuitee", "nuitées", "nuitees",
     "hébergement", "hebergement",
     "hôtel", "hotel",
-    "ehtc", "stdn",
+    "ehtc",
     "taux d'occupation", "taux occupation",
     "chambre", "capacité chambre",
     "maison d'hôte", "riad", "camping",
@@ -1570,6 +1577,186 @@ class Orchestrator:
         )
         return self.node_registry.run(context, preferred_key=node_key).to_legacy_dict()
 
+    def _direct_kpi_result(
+        self,
+        user_message: str,
+        response: str,
+        start_time: float,
+        run_id: Optional[str],
+    ) -> Dict:
+        """Build a legacy-compatible payload for deterministic KPI answers."""
+        total_time = (time.time() - start_time) * 1000
+        chart_paths = list(getattr(self.analytics_agent, "last_chart_paths", []) or [])
+        chart_path = chart_paths[0] if chart_paths else _chart_path_from_response(response)
+        if chart_path and chart_path not in chart_paths:
+            chart_paths.insert(0, chart_path)
+
+        agent_key = "analytics"
+        detected = _detect_domain(user_message + " " + response[:600])
+        if detected is not None:
+            self._active_domain = detected
+        self.last_agent = agent_key
+        self.conversation_log.append(("user", user_message))
+        self.conversation_log.append((agent_key, response[:800]))
+        if len(self.conversation_log) > 30:
+            self.conversation_log = self.conversation_log[-30:]
+        self.routing_history.append((user_message, agent_key, False))
+        if len(self.routing_history) > 100:
+            self.routing_history = self.routing_history[-100:]
+
+        metric_context = _metric_context_metadata(user_message + " " + response[:300], agent_key)
+        if metric_context == "apf":
+            data_scope_note = APF_SCOPE_LABEL
+        elif metric_context == "hebergement":
+            data_scope_note = HEBERGEMENT_SCOPE_LABEL
+        elif metric_context == "ambiguous":
+            data_scope_note = f"{APF_SCOPE_LABEL}; {HEBERGEMENT_SCOPE_LABEL}"
+        else:
+            data_scope_note = ""
+
+        return {
+            "agent": agent_key,
+            "agent_icon": "",
+            "agent_name": AGENT_NAMES.get(agent_key, "Analyste de Données"),
+            "response": response,
+            "chart_path": chart_path,
+            "chart_paths": chart_paths[:4],
+            "sources": [],
+            "confidence": "100%",
+            "data_freshness": {},
+            "rerouted": False,
+            "classification_time_ms": 0.0,
+            "total_time_ms": round(total_time, 1),
+            "metric_context": metric_context,
+            "period": _period_metadata(user_message),
+            "data_scope_note": data_scope_note,
+            "run_id": run_id or uuid.uuid4().hex[:10],
+            "trace": [
+                {
+                    "stage": "direct_sql",
+                    "label": "KPI Fabric direct",
+                    "agent": "analytics",
+                    "status": "done",
+                    "detail": "Reponse deterministe SQL sans planner LLM.",
+                    "duration_ms": round(total_time, 1),
+                }
+            ],
+            "fallbacks": [],
+            "errors": [],
+            "token_budget": {"evidence_chars": 6000, "response_chars": 9000, "max_charts": 4},
+        }
+
+    def _try_direct_kpi_route(
+        self,
+        user_message: str,
+        runtime_state: Optional[ConversationRuntimeState],
+        start_time: float,
+        run_id: Optional[str],
+    ) -> Optional[Dict]:
+        """Try deterministic KPI SQL before the plan/execute/review LLM flow."""
+        try:
+            from orchestration.external_impact import should_handle_external_impact
+            from orchestration.followup import resolve_followup
+
+            context = self._build_conversation_context()
+            working_message = resolve_followup(user_message, context)
+            if should_handle_external_impact(working_message, context):
+                return None
+            response = self._run_base_agent(
+                runtime_state,
+                "analytics",
+                lambda: self.analytics_agent.try_direct_kpi_answer(
+                    working_message,
+                    domain_context=self._active_domain,
+                ),
+            )
+            if not response:
+                return None
+            logger.info("Direct KPI route hit for '%s'", user_message[:60])
+            return self._direct_kpi_result(user_message, response, start_time, run_id)
+        except Exception as e:
+            logger.debug("Direct KPI route skipped: %s", e)
+            return None
+
+    def _try_prediction_route(
+        self,
+        user_message: str,
+        start_time: float,
+        run_id: Optional[str],
+    ) -> Optional[Dict]:
+        """Run simple forecast requests directly instead of through the planner."""
+        if not getattr(self, "prediction_agent", None):
+            return None
+        raw = (user_message or "").lower()
+        norm = _norm_text(user_message)
+        if not _has_prediction_intent(raw, norm):
+            return None
+        if _requires_planned_flow(user_message):
+            return None
+
+        actual_message = user_message
+        if self.conversation_log:
+            recent = self.conversation_log[-max(4, ORCHESTRATOR_RECENT_EXCHANGES * 2):]
+            ctx_lines = []
+            for role, text in recent:
+                short = text[:350].replace("\n", " ")
+                prefix = "USER" if role == "user" else role.upper()
+                ctx_lines.append(f"  {prefix}: {short}")
+            if self._session_summary:
+                ctx_lines.insert(0, f"  RÉSUMÉ: {self._session_summary[:1000]}")
+            actual_message = (
+                f"{user_message}\n\n"
+                "[Historique récent pour résoudre les références implicites:\n"
+                + "\n".join(ctx_lines)
+                + "]"
+            )
+
+        pred_result = self.prediction_agent.chat(actual_message)
+        response = pred_result.get("response", "")
+        chart_path = pred_result.get("chart_path")
+        chart_paths = [chart_path] if chart_path else []
+        total_time = (time.time() - start_time) * 1000
+
+        agent_key = "prediction"
+        self.last_agent = agent_key
+        self.conversation_log.append(("user", user_message))
+        self.conversation_log.append((agent_key, response[:800]))
+        if len(self.conversation_log) > 30:
+            self.conversation_log = self.conversation_log[-30:]
+        self.routing_history.append((user_message, agent_key, False))
+        if len(self.routing_history) > 100:
+            self.routing_history = self.routing_history[-100:]
+
+        return {
+            "agent": agent_key,
+            "agent_icon": pred_result.get("agent_icon", ""),
+            "agent_name": pred_result.get("agent_name", AGENT_NAMES.get(agent_key, "Prévisionniste STATOUR")),
+            "response": response,
+            "chart_path": chart_path,
+            "chart_paths": chart_paths,
+            "sources": [],
+            "confidence": "60%",
+            "data_freshness": {},
+            "rerouted": False,
+            "classification_time_ms": 0.0,
+            "total_time_ms": round(total_time, 1),
+            "metric_context": "prediction",
+            "period": pred_result.get("prediction_context", {}),
+            "data_scope_note": "projection non officielle basee sur historiques APF et hypotheses explicites",
+            "run_id": run_id or uuid.uuid4().hex[:10],
+            "trace": [{
+                "stage": "prediction_direct",
+                "label": "Prévision directe",
+                "agent": "prediction",
+                "status": "done",
+                "detail": "Moteur de prévision exécuté sans planner LLM.",
+                "duration_ms": round(total_time, 1),
+            }],
+            "fallbacks": [],
+            "errors": [],
+            "prediction_context": pred_result.get("prediction_context", {}),
+        }
+
     def route(
         self,
         user_message: str,
@@ -1622,6 +1809,56 @@ class Orchestrator:
 
         self.message_count += 1
         start = time.time()
+
+        try:
+            from orchestration.external_impact import (
+                needs_external_event_search,
+                should_handle_external_impact,
+                run_external_impact_analysis,
+            )
+            from orchestration.followup import resolve_followup
+
+            context = self._build_conversation_context()
+            working_message = resolve_followup(user_message, context)
+            if should_handle_external_impact(working_message, context):
+                search_tool = (
+                    getattr(self.researcher_agent, "searcher", None)
+                    if needs_external_event_search(working_message)
+                    else None
+                )
+                result = run_external_impact_analysis(
+                    message=working_message,
+                    db_layer=getattr(self.analytics_agent, "_db", None),
+                    search_tool=search_tool,
+                    conversation_context=context,
+                    run_id=run_id,
+                )
+                result["total_time_ms"] = round((time.time() - start) * 1000, 1)
+
+                agent_key = result.get("agent", "researcher")
+                response = result.get("response", "")
+                self.last_agent = agent_key
+                self.conversation_log.append(("user", user_message))
+                self.conversation_log.append((agent_key, response[:800]))
+                if len(self.conversation_log) > 30:
+                    self.conversation_log = self.conversation_log[-30:]
+                self.routing_history.append((user_message, agent_key, False))
+                if len(self.routing_history) > 100:
+                    self.routing_history = self.routing_history[-100:]
+                detected = _detect_domain(user_message + " " + response[:600])
+                if detected is not None:
+                    self._active_domain = detected
+                return result
+        except Exception as e:
+            logger.debug("External impact fast route skipped: %s", e)
+
+        direct = self._try_direct_kpi_route(user_message, runtime_state, start, run_id)
+        if direct is not None:
+            return direct
+
+        prediction = self._try_prediction_route(user_message, start, run_id)
+        if prediction is not None:
+            return prediction
 
         # ══════════════════════════════════════════════════════════════════════
         # NEW FLOW: Plan-Execute-Review-Humanize pipeline
@@ -2015,9 +2252,11 @@ class Orchestrator:
         metric_context = _metric_context_metadata(user_message, agent_key)
         period_meta = _period_metadata(user_message)
         if metric_context == "apf":
-            data_scope_note = "APF/DGSN, arrivees aux postes frontieres"
+            data_scope_note = APF_SCOPE_LABEL
         elif metric_context == "hebergement":
-            data_scope_note = "hebergement classe EHTC/STDN + estimatif"
+            data_scope_note = HEBERGEMENT_SCOPE_LABEL
+        elif metric_context == "ambiguous":
+            data_scope_note = f"{APF_SCOPE_LABEL}; {HEBERGEMENT_SCOPE_LABEL}"
         elif metric_context == "prediction":
             data_scope_note = "projection non officielle basee sur historiques APF et hypotheses explicites"
         elif metric_context == "research":

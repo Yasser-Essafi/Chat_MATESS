@@ -129,11 +129,11 @@ TABLES DISPONIBLES:
   Colonnes: statistiques_apf_id, nationalite, poste_frontiere, region, continent, voie, date_stat, mre, tes
   Note: "nationalite" = pays de résidence (PAS la nationalité ethnique)
   Métriques: mre (Marocains résidant à l'étranger), tes (Touristes étrangers), total = mre + tes
-  Données: 2019 + 2023-2026 (Jan-Fév 2026 seulement)
+  Données mensuelles: vérifier les mois disponibles par année avant toute comparaison partielle
 
-- [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] — Nuitées/arrivées hôtelières
+- [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] — Nuitées/arrivées hôtelières estimées
   Colonnes: eht_id, nationalite_name, categorie_name, province_name, region_name, date_stat, nuitees, arrivees
-  Note: date_stat = 1er du mois (données mensuelles)
+  Note: nationalite_name = pays de résidence; date_stat = granularité mensuelle
   Géographie: province_name = ville/province (ex. Casablanca, Marrakech, Tanger), region_name = région administrative (ex. Casablanca-Settat).
   Si l'utilisateur dit seulement "Casablanca", "Marrakech", "Tanger", etc., filtrer province_name avec UPPER(province_name) LIKE '%CASABLANCA%'.
 
@@ -145,8 +145,8 @@ JOINTURES:
 RÈGLES:
 - TOUJOURS préfixer les tables: [dbo_GOLD].[nom_table]
 - TOUJOURS agréger en SQL (GROUP BY, SUM, COUNT, TOP N) — JAMAIS tirer des millions de lignes
-- date_stat est toujours le 1er du mois: filtrer avec YEAR(date_stat) = X AND MONTH(date_stat) = Y
-- 2026 n'a que Jan-Fév — ne JAMAIS comparer 2026 complet avec des années complètes
+- date_stat est mensuel: filtrer avec date_stat IS NOT NULL AND YEAR(date_stat) = X AND MONTH(date_stat) = Y
+- Si 2026 est partielle, comparer seulement les mêmes mois disponibles entre années
 - Les séries historiques internes ne couvrent pas forcément toutes les années demandées: si une plage inclut 2018 ou 2020-2022, interroger les années disponibles et imprimer une note de couverture/missing years, sans conclure que toute la période est vide.
 - Utiliser print(to_md(df)) pour afficher les résultats
 - Si graphique demandé: utiliser save_chart(fig, "label") — PAS fig.write_html()

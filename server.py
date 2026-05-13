@@ -131,7 +131,7 @@ def _rate_limited(ip: str) -> bool:
 
 
 # ── Inline chart-path extractor (avoids importing Streamlit components) ──
-_CHARTS_DIR = os.path.join(PROJECT_ROOT, "charts")
+_CHARTS_DIR = os.environ.get("STATOUR_CHARTS_DIR", os.path.join(PROJECT_ROOT, "charts"))
 
 def extract_chart_path(text: str) -> Optional[str]:
     """Extract chart path from LLM response, restricted to the charts/ directory."""
@@ -1695,7 +1695,7 @@ def _build_report_html(payload: dict) -> str:
 </html>"""
 
 
-REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
+REPORTS_DIR = os.environ.get("STATOUR_REPORTS_DIR", os.path.join(PROJECT_ROOT, "reports"))
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 

@@ -23,6 +23,7 @@ from .executor import Executor, ExecutionResult
 from .reviewer import review, ReviewResult
 from .humanizer import humanize_simple, humanize_complex
 from .followup import resolve_followup
+from .external_impact import should_handle_external_impact, run_external_impact_analysis
 
 logger = get_logger("statour.orchestration.graph")
 
@@ -59,6 +60,30 @@ def run_graph(
     language = detect_language(message)
     working_message = resolve_followup(message, conversation_context)
     followup_resolved = working_message != message
+
+    # Specialized path for geopolitical/macroeconomic/event impact analysis.
+    # Run it before triage: the matcher is deterministic and avoids spending
+    # several seconds classifying questions that already have a controlled path.
+    if should_handle_external_impact(working_message, conversation_context):
+        if followup_resolved:
+            trace.append({
+                "stage": "context",
+                "label": "Resolution du suivi",
+                "status": "done",
+                "agent": "orchestrator",
+                "detail": "Le tour court reprend la forme analytique du tour precedent.",
+            })
+        external_result = run_external_impact_analysis(
+            message=working_message,
+            db_layer=db_layer,
+            search_tool=search_tool,
+            conversation_context=conversation_context,
+            run_id=rid,
+        )
+        external_result["classification_time_ms"] = 0.0
+        external_result["total_time_ms"] = round((time.time() - start) * 1000, 1)
+        external_result["trace"] = trace + external_result.get("trace", [])
+        return external_result
 
     # ═══════════════════════════════════════════════════════════════════════
     # Step 1: TRIAGE
@@ -123,6 +148,22 @@ def run_graph(
             "fallbacks": [],
             "errors": [],
         }
+
+    # Specialized path for geopolitical/macroeconomic/event impact analysis.
+    # It resolves the event before SQL, so the query window is not guessed by
+    # the generic planner.
+    if should_handle_external_impact(working_message, conversation_context):
+        external_result = run_external_impact_analysis(
+            message=working_message,
+            db_layer=db_layer,
+            search_tool=search_tool,
+            conversation_context=conversation_context,
+            run_id=rid,
+        )
+        external_result["classification_time_ms"] = round(triage_result.duration_ms, 1)
+        external_result["total_time_ms"] = round((time.time() - start) * 1000, 1)
+        external_result["trace"] = trace + external_result.get("trace", [])
+        return external_result
 
     # ═══════════════════════════════════════════════════════════════════════
     # COMPLEX PATH: Plan → Execute → Review → Humanize

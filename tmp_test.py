@@ -85,7 +85,7 @@ TESTS = [
     ("A13 compare_years", "comparaison arrivées 2024 vs 2025", "analytics",
         ["2024", "2025"], ["Impossible"], {}),
 
-    # ─── Analytics — Hébergement/Nuitées (STDN) ─────────────────────────────
+    # ─── Analytics — Hébergement/Nuitées estimées ───────────────────────────
     # Ces tests vérifient que les questions hébergement n'utilisent PAS les données APF.
     # must_not: "postes frontières", "MRE", "TES" — termes exclusifs à APF.
     # must_not utilise "postes frontières" et "MRE" (exclusifs APF) au lieu de "TES"

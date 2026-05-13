@@ -1,0 +1,54 @@
+name: Deploy to Azure
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AZURE_CLIENT_ID: 08e635ca-f973-4570-99e3-1af7c94e047c
+  AZURE_TENANT_ID: 02c917e4-0982-4945-b5ed-f2c037a607ec
+  AZURE_SUBSCRIPTION_ID: 3be72ef8-5a3c-4f1e-b905-f74b9f3eba4d
+  RESOURCE_GROUP: MTAESS
+  ACR_NAME: acrmatess6393
+  WEBAPP_NAME: app-chat-matess-6393
+  IMAGE_NAME: statour-chatbot
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build image in Azure Container Registry
+        run: |
+          az acr build \
+            --resource-group "$RESOURCE_GROUP" \
+            --registry "$ACR_NAME" \
+            --image "$IMAGE_NAME:${{ github.sha }}" \
+            --image "$IMAGE_NAME:latest" \
+            .
+
+      - name: Point App Service to the new image
+        run: |
+          az webapp config set \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$WEBAPP_NAME" \
+            --linux-fx-version "DOCKER|$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }}"
+
+          az webapp restart \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$WEBAPP_NAME"

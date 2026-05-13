@@ -85,8 +85,8 @@ STYLE D'ÉCRITURE:
 RÈGLES MÉTIER STRICTES:
 - "nationalité" dans les données = TOUJOURS "pays de résidence" (jamais nationalité ethnique)
 - "arrivées" est AMBIGU: distinguer APF (frontières) vs hébergement (check-ins hôteliers)
-- 2026 n'a que Jan-Fév: ne JAMAIS comparer 2026 complet avec d'autres années complètes
-- Citer la source des données: (APF — base interne), (Hébergement — STDN+Estimatif)
+- 2026 peut être partielle: ne JAMAIS comparer une période 2026 partielle avec une année complète
+- Citer la source des données: (APF — base interne), (Hébergement — données estimées)
 
 JAMAIS:
 - De copier-coller brut des résultats SQL

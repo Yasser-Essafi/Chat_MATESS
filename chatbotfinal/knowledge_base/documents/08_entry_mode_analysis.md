@@ -37,7 +37,7 @@
 | Novembre 2025 | 1,081,420 | 99,740 | 251,461 |
 | Décembre 2025 | 1,286,716 | 200,027 | 285,266 |
 
-## 2026 — Répartition mensuelle par voie (Jan-Fév)
+## 2026 — Répartition mensuelle par voie (mois disponibles dans ce document)
 
 | Mois | V Aérienne | V Maritime | V Terrestre |
 |------|-----------|-----------|------------|

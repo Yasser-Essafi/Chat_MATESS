@@ -49,6 +49,15 @@ df = df_raw[df_raw['year'].isin([2019, 2023, 2024, 2025, 2026])].copy()
 
 print(f"  Enregistrements: {len(df):,} | Periode: {df['date_stat'].min().date()} → {df['date_stat'].max().date()}")
 
+LATEST_YEAR = int(df['year'].max())
+LATEST_YEAR_MONTHS = sorted(int(m) for m in df[df['year'] == LATEST_YEAR]['month'].dropna().unique())
+LATEST_YEAR_MONTH_LABEL = (
+    f"Janvier-{MONTH_FR[LATEST_YEAR_MONTHS[-1]]}"
+    if LATEST_YEAR_MONTHS and LATEST_YEAR_MONTHS[0] == 1 and LATEST_YEAR_MONTHS[-1] > 1
+    else (MONTH_FR[LATEST_YEAR_MONTHS[0]] if len(LATEST_YEAR_MONTHS) == 1 else "mois disponibles")
+)
+LATEST_DATE_LABEL = df['date_stat'].max().strftime('%B %Y')
+
 
 # ── Helper ─────────────────────────────────────────────────────────────────
 def n(v):
@@ -166,7 +175,7 @@ def gen_02_statistical_overview():
     )
     total_2025 = df[df['year']==2025]['total'].sum()
 
-    # Monthly 2026 (jan-feb)
+    # Monthly 2026 (available months)
     m2026 = df[df['year']==2026].groupby(['month','month_name']).agg(
         mre=('mre','sum'), tes=('tes','sum'), total=('total','sum')
     ).reset_index().sort_values('month')
@@ -176,14 +185,14 @@ def gen_02_statistical_overview():
         for _, r in m2026.iterrows()
     )
 
-    # Jan/Feb comparison 2024 vs 2025 vs 2026
+    # Same available-months comparison 2024 vs 2025 vs 2026
     comp_janfev = []
     for yr in [2024, 2025, 2026]:
-        sub = df[(df['year']==yr) & (df['month'].isin([1,2]))]
+        sub = df[(df['year']==yr) & (df['month'].isin(LATEST_YEAR_MONTHS))]
         mre_v = sub['mre'].sum()
         tes_v = sub['tes'].sum()
         tot_v = sub['total'].sum()
-        comp_janfev.append(f"| Jan-Fév {yr} | {n(mre_v)} | {n(tes_v)} | {n(tot_v)} |")
+        comp_janfev.append(f"| {LATEST_YEAR_MONTH_LABEL} {yr} | {n(mre_v)} | {n(tes_v)} | {n(tot_v)} |")
     rows_comp = "\n".join(comp_janfev)
 
     # Top 10 nationalities all time
@@ -198,11 +207,11 @@ def gen_02_statistical_overview():
 > Généré le {TODAY}
 
 ## Résumé global
-- **Période couverte** : Janvier 2019 → Février 2026
+- **Période couverte** : {df['date_stat'].min().strftime('%B %Y')} → {LATEST_DATE_LABEL}
 - **Total arrivées (2023-2026)** : {n(df[df['year']>=2023]['total'].sum())}
 - **Total MRE** : {n(df[df['year']>=2023]['mre'].sum())} ({pct(df[df['year']>=2023]['mre'].sum(), df[df['year']>=2023]['total'].sum())})
 - **Total TES** : {n(df[df['year']>=2023]['tes'].sum())} ({pct(df[df['year']>=2023]['tes'].sum(), df[df['year']>=2023]['total'].sum())})
-- **Dernière donnée disponible** : {df['date_stat'].max().strftime('%B %Y')} (Février 2026)
+- **Dernière donnée disponible** : {LATEST_DATE_LABEL}
 
 ## Évolution annuelle
 
@@ -223,9 +232,9 @@ def gen_02_statistical_overview():
 |------|-----|-----|-------|
 {rows_2026}
 
-> ⚠️ Les données 2026 disponibles s'arrêtent à **Février 2026**. Mars 2026 et au-delà ne sont pas encore dans le dataset.
+> ⚠️ Les données {LATEST_YEAR} disponibles couvrent **{LATEST_YEAR_MONTH_LABEL} {LATEST_YEAR}**. Toute comparaison annuelle doit aligner les mois.
 
-## Comparaison Jan-Fév (2024 / 2025 / 2026)
+## Comparaison mois disponibles (2024 / 2025 / 2026)
 
 | Période | MRE | TES | Total |
 |---------|-----|-----|-------|
@@ -391,19 +400,19 @@ def gen_05_monthly_2026():
 - **Top 3 régions** : {reg_str}
 """)
 
-    content = f"""# 📅 Données 2026 — Janvier & Février (Dernières données disponibles)
+    content = f"""# 📅 Données 2026 — Mois disponibles
 
 > Généré le {TODAY}
 
-> ⚠️ **Les données disponibles pour 2026 s'arrêtent à Février 2026.**
-> Mars 2026, Avril 2026 et les mois suivants ne sont PAS dans le dataset actuel.
+> ⚠️ **Les données disponibles pour 2026 couvrent {LATEST_YEAR_MONTH_LABEL} 2026.**
+> Toute comparaison avec 2025 doit utiliser les mêmes mois.
 
 ## Vue mensuelle 2026
 
 | Mois | MRE | TES | Total | % MRE |
 |------|-----|-----|-------|-------|
 {rows}
-| **CUMUL Jan-Fév 2026** | **{n(df[df['year']==yr]['mre'].sum())}** | **{n(df[df['year']==yr]['tes'].sum())}** | **{n(df[df['year']==yr]['total'].sum())}** | |
+| **CUMUL {LATEST_YEAR_MONTH_LABEL} 2026** | **{n(df[df['year']==yr]['mre'].sum())}** | **{n(df[df['year']==yr]['tes'].sum())}** | **{n(df[df['year']==yr]['total'].sum())}** | |
 
 ## Comparaison avec les mêmes mois 2025
 
@@ -414,10 +423,10 @@ def gen_05_monthly_2026():
 ## Détail par mois
 {''.join(details)}
 
-## Conclusion Jan-Fév 2026
-- Cumul Jan-Fév 2026 : **{n(df[df['year']==yr]['total'].sum())}** arrivées
-- vs Jan-Fév 2025 : **{n(df[(df['year']==2025) & (df['month'].isin([1,2]))]['total'].sum())}** arrivées
-- Évolution : {pct(df[df['year']==yr]['total'].sum() - df[(df['year']==2025)&(df['month'].isin([1,2]))]['total'].sum(), df[(df['year']==2025)&(df['month'].isin([1,2]))]['total'].sum())}
+## Conclusion 2026
+- Cumul {LATEST_YEAR_MONTH_LABEL} 2026 : **{n(df[df['year']==yr]['total'].sum())}** arrivées
+- vs mêmes mois 2025 : **{n(df[(df['year']==2025) & (df['month'].isin(LATEST_YEAR_MONTHS))]['total'].sum())}** arrivées
+- Évolution : {pct(df[df['year']==yr]['total'].sum() - df[(df['year']==2025)&(df['month'].isin(LATEST_YEAR_MONTHS))]['total'].sum(), df[(df['year']==2025)&(df['month'].isin(LATEST_YEAR_MONTHS))]['total'].sum())}
 """
     write_doc("05_monthly_2026.md", content)
 
@@ -448,7 +457,7 @@ def gen_06_pays_residence_analysis():
         total_nat = sub['total'].sum()
         monthly_details.append(f"| {nat} | {n(total_nat)} | {rows_nat} |")
 
-    # 2026 Jan-Fev by nationality top 20
+    # 2026 available months by nationality top 20
     top20_2026 = df[df['year']==2026].groupby('nationalite').agg(
         mre=('mre','sum'), tes=('tes','sum'), total=('total','sum')
     ).nlargest(20, 'total').reset_index()
@@ -543,7 +552,7 @@ def gen_07_regional_analysis():
         reg_details.append(f"| {reg} | {n(total_reg)} | " + " | ".join(row_vals) + " |")
     rows_2025_monthly = "\n".join(reg_details)
 
-    # 2026 Jan-Fev by region
+    # 2026 available months by region
     reg_2026 = df[df['year']==2026].groupby('region').agg(
         mre=('mre','sum'), tes=('tes','sum'), total=('total','sum')
     ).sort_values('total', ascending=False).reset_index()
@@ -646,7 +655,7 @@ def gen_08_entry_mode_analysis():
 |------|-----------|-----------|------------|
 {rows_mv_2025}
 
-## 2026 — Répartition mensuelle par voie (Jan-Fév)
+## 2026 — Répartition mensuelle par voie (mois disponibles)
 
 | Mois | V Aérienne | V Maritime | V Terrestre |
 |------|-----------|-----------|------------|
@@ -686,7 +695,7 @@ def gen_09_border_posts():
         for p in top10_names if p in pivot_2025.index
     )
 
-    # 2026 Jan-Fev by poste
+    # 2026 available months by poste
     top10_2026 = df[df['year']==2026].groupby('poste_frontiere').agg(
         mre=('mre','sum'), tes=('tes','sum'), total=('total','sum')
     ).nlargest(10, 'total').reset_index()
@@ -748,7 +757,7 @@ def gen_10_continent_analysis():
         for _, r in cont_2025.iterrows()
     )
 
-    # 2026 Jan-Fev
+    # 2026 available months
     cont_2026 = df[df['year']==2026].groupby('continent').agg(
         mre=('mre','sum'), tes=('tes','sum'), total=('total','sum')
     ).sort_values('total', ascending=False).reset_index()
@@ -893,7 +902,7 @@ def gen_12_year_comparison():
     months_2026 = sorted(df[df['year']==2026]['month'].unique())
     t2025_same = df[(df['year']==2025) & (df['month'].isin(months_2026))]['total'].sum()
     g2026 = (t2026 - t2025_same) / t2025_same * 100 if t2025_same > 0 else 0
-    growth_rows.append(f"| 2025 (Jan-Fév) → 2026 (Jan-Fév) | {n(t2025_same)} | {n(t2026)} | +{g2026:.1f}% |")
+    growth_rows.append(f"| 2025 ({LATEST_YEAR_MONTH_LABEL}) → 2026 ({LATEST_YEAR_MONTH_LABEL}) | {n(t2025_same)} | {n(t2026)} | +{g2026:.1f}% |")
     rows_growth = "\n".join(growth_rows)
 
     col_header = "| Mois | " + " | ".join(str(y) for y in years) + " |"
@@ -910,7 +919,7 @@ def gen_12_year_comparison():
 """
     for yr in [2023,2024,2025,2026]:
         sub = df[df['year']==yr]
-        label = f"{yr} ({'Jan-Fév' if yr==2026 else 'complet'})"
+        label = f"{yr} ({LATEST_YEAR_MONTH_LABEL if yr==2026 else 'complet'})"
         content += f"| {label} | {n(sub['total'].sum())} | {n(sub['mre'].sum())} | {n(sub['tes'].sum())} |\n"
 
     content += f"""

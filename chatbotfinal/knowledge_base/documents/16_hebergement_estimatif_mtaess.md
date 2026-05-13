@@ -1,89 +1,42 @@
-# Hébergement Touristique et Estimatif — MTAESS
+# Hébergement Touristique Estimé — MTAESS
 
 > Base de connaissances interne STATOUR
 
-## Sources de données hébergement
+## Périmètre disponible
 
-Le Ministère du Tourisme collecte les données d'hébergement via 2 systèmes parallèles :
+Les analyses d'hébergement accessibles au chatbot doivent utiliser uniquement la table Fabric
+`fact_statistiqueshebergementnationaliteestimees` et les dimensions Gold exposées dans `.env`.
 
-**STDN (Système de Télé-déclaration des Nuitées)**
-- Source principale si taux de déclaration ≥ seuil fixé par la Direction Statistiques
-- Déclarations quotidiennes électroniques par les établissements
-- Couvre les EHTC (Établissements d'Hébergement Touristique Classés)
-
-**STATOUR**
-- Plateforme de saisie manuelle par les délégations régionales/provinciales
-- Fréquence mensuelle
-- Source complémentaire/backup quand STDN insuffisant
-- Workflow : Agent saisie → Délégué → Validation Direction Statistiques
-
-**EHTC** : ~5000 établissements classés (hôtels 1 à 5 étoiles, maisons d'hôtes, campings,
-résidences, auberges)
-
-## Métriques clés hébergement
+La table décrit les établissements d'hébergement touristique classés avec une granularité mensuelle.
+Les métriques principales sont :
 
 | Métrique | Définition | Formule |
-|----------|-----------|---------|
-| Nuitées | Nuits passées en hébergement | 1 touriste × 1 nuit = 1 nuitée |
-| Arrivées (EHTC) | Check-ins dans les établissements | ≠ Arrivées APF |
-| TO (Taux d'Occupation) | % chambres occupées | chambres occupées / chambres disponibles × 100 |
-| Indice de fréquentation | Personnes par chambre | occupants / clé (chambre/appartement) |
-| DMS (Durée Moyenne de Séjour) | Nuits moyennes par arrivée | nuitées / arrivées |
-| Capacité | Chambres disponibles | par établissement, historisé |
+|----------|------------|---------|
+| Nuitées | Nuits passées en hébergement | somme de `nuitees` |
+| Arrivées hôtelières | Check-ins dans les établissements | somme de `arrivees` |
+| DMS | Durée moyenne de séjour | `SUM(nuitees) / SUM(arrivees)` |
 
-## Méthodologie de l'Estimatif
+## Règles d'interprétation
 
-L'estimatif compense les non-déclarations (~60% des EHTC ne déclarent pas régulièrement).
+- Les arrivées hôtelières ne sont pas les arrivées APF aux frontières.
+- `nationalite_name` signifie pays de résidence du touriste.
+- `province_name` représente la province ou destination utilisée pour filtrer Casablanca, Marrakech, Agadir, Tanger, etc.
+- `region_name` représente la région administrative.
+- `date_stat` est une période mensuelle: filtrer avec `YEAR(date_stat)` et `MONTH(date_stat)`.
 
-**Étape 1 — Sélection de l'échantillon**
-- Un établissement est retenu si son TO déclaré est dans l'intervalle valide de sa province
-- Codification provinces : codes 1, 2, 3 = provinces standard | code 4 = stations balnéaires
-- Intervalles TO définis différemment selon le code province
+## Jointures utiles
 
-**Étape 2 — Calcul de la moyenne provinciale**
-- Moyenne TO des établissements de l'échantillon par province
+| Besoin | Jointure |
+|--------|----------|
+| Type d'hébergement | `gld_dim_categories_classements` sur `categorie_name`, puis `type_eht_libelle` |
+| Nom et capacité d'établissement | `gld_dim_etablissements_hebergements` sur `CAST(etablissement_id_genere AS VARCHAR) = eht_id` |
+| Délégation | `gld_dim_delegations` sur `delegation_bk = delegation_id` |
 
-**Étape 3 — TO estimé par établissement**
-- TO estimé = Moyenne provinciale × Chambres disponibles × Jours du mois
+## Catégories d'hébergement
 
-**Étape 4 — Nuitées estimées**
-- Nuitées estimées = Chambres occupées estimées × Indice de fréquentation
-
-**Étape 5 — Arrivées estimées**
-- Arrivées estimées = Nuitées estimées / DMS
-
-**Étape 6 — Répartition par nationalité**
-- Pondération croisée : données APF (postes frontières) + ONDA (aéroports)
-- Permet de calculer le poids de chaque pays de résidence dans les arrivées par établissement
-
-*La Division Statistiques peut ajuster les paramètres de calcul via une interface dédiée.*
-
-## Confrontation STATOUR / STDN
-
-Le matching des établissements entre les deux référentiels atteint ~89% (3763/4209 EHTC).
-
-**Pipeline de matching (4 niveaux)** :
-1. **N1 — Exact** : correspondance parfaite nom + province
-2. **N2 — Google Places API** : matching par `place_id` géographique
-3. **N3 — GPT IA** : analyse sémantique de similarité
-4. **N4 — Jaccard** : similarité de chaînes de caractères
-
-**Résultats de la confrontation** :
-- Établissements dans STATOUR mais pas STDN → potentiel non-déclarant STDN
-- Établissements dans STDN mais pas STATOUR → non classé ou nouveau
-
-La table Gold `dim_mapping_eht` stocke le résultat avec 38 colonnes incluant enrichissement
-géographique, ratings Google Places, et indicateurs de tableau de bord.
-
-## Exclusions
-
-**Bivouacs** : exclus de l'estimatif (nature et capacité incompatibles avec le modèle).
-
-## Catégories d'hébergement (type_eht_libelle)
-
-- Hôtels classés (1 à 5 étoiles)
+- Hôtels classés
 - Maisons d'hôtes
 - Campings
 - Résidences de tourisme
 - Auberges de jeunesse
-- Bivouacs (exclus de l'estimatif)
+- Autres catégories exposées par `gld_dim_categories_classements`

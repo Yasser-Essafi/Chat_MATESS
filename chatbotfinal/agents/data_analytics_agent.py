@@ -72,6 +72,14 @@ from config.settings import (
 )
 from utils.base_agent import BaseAgent
 from utils.logger import get_logger
+from utils.fabric_catalog import (
+    APF_TABLE,
+    HEBERGEMENT_TABLE,
+    APF_SCOPE_LABEL,
+    HEBERGEMENT_SCOPE_LABEL,
+    business_catalog_text,
+    month_range_label,
+)
 
 logger = get_logger("statour.analytics")
 
@@ -373,7 +381,6 @@ class DataAnalyticsAgent(BaseAgent):
         self.kpi_cache = None   # Will be set after data loads
         self._apf_df = None     # APF DataFrame kept in memory for KPI/prediction
         self._db = None         # DBLayer reference for SQL-on-demand queries
-
         logger.info("Cataloging Fabric Gold metadata")
         self._auto_load_all_data()
 
@@ -426,6 +433,72 @@ class DataAnalyticsAgent(BaseAgent):
         "december": (12, "Décembre"),
     }
 
+    def _cached_safe_query(self, sql_text: str) -> pd.DataFrame:
+        """Run a read-only SQL fast path directly against Fabric.
+
+        The name is kept to avoid a broad mechanical rename, but this method no
+        longer caches result values. These KPI answers must reflect the current
+        Fabric tables exactly.
+        """
+        return self._db.safe_query(sql_text)
+
+    def _available_months(self, table_name: str, year: int) -> List[int]:
+        if not getattr(self, "_db", None) or self._db.source != "fabric":
+            return []
+        try:
+            tbl = self._db._qualify(table_name)
+            df = self._cached_safe_query(
+                f"SELECT DISTINCT MONTH(date_stat) AS mois FROM {tbl} "
+                f"WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {int(year)} "
+                f"ORDER BY mois"
+            )
+            if df.empty:
+                return []
+            return [int(m) for m in df["mois"].dropna().tolist()]
+        except Exception as e:
+            logger.debug("Available months lookup failed for %s/%s: %s", table_name, year, e)
+            return []
+
+    def _partial_period_note(self, table_name: str, year: int, label: str) -> str:
+        months = self._available_months(table_name, year)
+        if months and len(months) < 12:
+            return (
+                f"\n\nNote: {year} est une annee partielle pour {label} "
+                f"({month_range_label(months)} uniquement). Ne pas comparer ce total "
+                "a une annee complete sans aligner les mois."
+            )
+        return ""
+
+    def _partial_period_note_from_coverage(
+        self,
+        year: int,
+        label: str,
+        month_count,
+        min_month=None,
+        max_month=None,
+    ) -> str:
+        """Build a partial-year note from coverage already returned by SQL."""
+        try:
+            count = int(month_count or 0)
+        except Exception:
+            return ""
+        if count <= 0 or count >= 12:
+            return ""
+        try:
+            start = int(min_month) if min_month is not None and not pd.isna(min_month) else None
+            end = int(max_month) if max_month is not None and not pd.isna(max_month) else None
+        except Exception:
+            start = end = None
+        if start and end and count == (end - start + 1):
+            months_label = month_range_label(list(range(start, end + 1)))
+        else:
+            months_label = f"{count} mois disponibles"
+        return (
+            f"\n\nNote: {year} est une annee partielle pour {label} "
+            f"({months_label} uniquement). Ne pas comparer ce total "
+            "a une annee complete sans aligner les mois."
+        )
+
     def _build_temporal_constraint(self, message: str) -> str:
         """Return a soft hint about the requested time period for the LLM.
 
@@ -457,15 +530,18 @@ class DataAnalyticsAgent(BaseAgent):
                 f"\n\nPériode demandée : comparaison {years_label}.\n"
                 f"Filtre SQL attendu : WHERE YEAR(date_stat) IN ({years_sql})"
             )
-            # When 2026 is in an APF comparison, force month-alignment (Jan–Feb only
-            # for APF — confirmed partial year). Hébergement may have more 2026 months,
-            # so we only apply this constraint when the query is clearly about APF.
+            # When 2026 is in a comparison, force month-alignment from the live
+            # Fabric coverage. APF and hebergement can have different last months.
             PARTIAL_YEAR = 2026
             _APF_SIGNALS = ["apf", "frontière", "frontiere", "poste", "mre", "tes",
                             "voie", "continent", "diaspora"]
             is_apf_query = any(kw in msg_lower for kw in _APF_SIGNALS)
+            table_for_coverage = APF_TABLE if is_apf_query else HEBERGEMENT_TABLE
+            months_2026 = self._available_months(table_for_coverage, PARTIAL_YEAR)
+            last_month = max(months_2026) if months_2026 else (
+                self.kpi_cache.get("last_month", 2) if self.kpi_cache and is_apf_query else 2
+            )
             if PARTIAL_YEAR in years and is_apf_query:
-                last_month = self.kpi_cache.get("last_month", 2) if self.kpi_cache else 2
                 months_list = ", ".join(str(m) for m in range(1, last_month + 1))
                 _MO_NAMES = {
                     1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
@@ -475,7 +551,7 @@ class DataAnalyticsAgent(BaseAgent):
                 last_month_name = _MO_NAMES.get(last_month, str(last_month))
                 base_constraint += (
                     f" AND MONTH(date_stat) IN ({months_list})\n\n"
-                    f"⚠️ RÈGLE APF : la table APF 2026 ne contient que Janvier–{last_month_name}. "
+                    f"⚠️ RÈGLE APF : la table APF 2026 contient actuellement Janvier–{last_month_name}. "
                     f"Filtrer LES DEUX années sur MONTH(date_stat) IN ({months_list}). "
                     f"Indiquer dans la réponse : 'Comparaison Janvier–{last_month_name} uniquement "
                     f"(APF — données partielles 2026)'."
@@ -483,9 +559,9 @@ class DataAnalyticsAgent(BaseAgent):
             elif PARTIAL_YEAR in years:
                 # Ambiguous or hébergement query — advise to verify coverage first
                 base_constraint += (
-                    f"\n\n⚠️ NOTE : pour 2026, vérifier la couverture réelle avec "
-                    f"SELECT DISTINCT MONTH(date_stat) avant de comparer les années. "
-                    f"L'APF s'arrête à Février 2026 ; l'hébergement peut avoir plus de mois."
+                    f"\n\n⚠️ NOTE : pour 2026, vérifier la couverture réelle par table avec "
+                    f"SELECT DISTINCT MONTH(date_stat). Si l'année est partielle, aligner les "
+                    f"années comparées sur les mois disponibles."
                 )
             return base_constraint
 
@@ -841,6 +917,10 @@ class DataAnalyticsAgent(BaseAgent):
         values_text = "\n".join(samples) if samples else ""
         ds_list = ", ".join(self.datasets.keys()) if self.datasets else "None"
         active = self.active_dataset_name or "None"
+        business_catalog = business_catalog_text(
+            self.datasets,
+            schema=getattr(getattr(self, "_db", None), "schema", "dbo_GOLD"),
+        )
 
         base_intro = (
             "Tu génères du T-SQL exécuté sur Microsoft Fabric Lakehouse Gold via la fonction sql().\n"
@@ -852,7 +932,7 @@ class DataAnalyticsAgent(BaseAgent):
             "Si ambigu → fournir LES DEUX métriques dans la réponse.\n\n"
             "━━ ROUTAGE OBLIGATOIRE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "HÉBERGEMENT → [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees]\n"
-            "  Mots-clés : nuitées, hébergement, hôtel, EHTC, STDN, TO, taux occupation,\n"
+            "  Mots-clés : nuitées, hébergement, hôtel, EHTC, TO, taux occupation,\n"
             "               établissement, délégation, maison d'hôtes, capacité, chambre\n"
             "  Métriques : nuitees, arrivees\n\n"
             "FRONTIÈRES → [dbo_GOLD].[fact_statistiques_apf]\n"
@@ -861,19 +941,15 @@ class DataAnalyticsAgent(BaseAgent):
             "JAMAIS croiser les métriques entre les deux tables.\n\n"
             "━━ CONTEXTE MÉTIER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "- \"nationalite\" en SQL = pays de résidence du voyageur (PAS nationalité ethnique)\n"
+            "- \"nationalite_name\" en SQL = pays de résidence du touriste hébergé\n"
             "- Renommer dans l'output : nationalite → \"Pays de résidence\"\n"
             "- MRE = Marocains diaspora | TES = Touristes étrangers\n"
-            "- date_stat = toujours 1er du mois (mensuel, pas quotidien)\n"
-            "- COUVERTURE 2026 PAR TABLE :\n"
-            "  • fact_statistiques_apf (APF) : UNIQUEMENT Janvier–Février 2026 confirmés.\n"
-            "    → Toute comparaison APF 2026 vs N-1 DOIT restreindre les deux années à Jan–Fév.\n"
-            "    → Signaler dans la réponse : 'Comparaison Jan–Fév uniquement (APF, données partielles 2026)'.\n"
-            "  • fact_statistiqueshebergementnationaliteestimees (hébergement) : mois 2026 potentiellement\n"
-            "    supérieurs à Février. Toujours vérifier avec SELECT DISTINCT MONTH(date_stat) avant de conclure.\n"
-            "    → Ne jamais supposer que l'hébergement s'arrête à Février 2026.\n\n"
+            "- date_stat = granularité mensuelle; filtrer avec YEAR(date_stat) et MONTH(date_stat), jamais par jour exact\n"
+            "- 2026 peut être partielle et la couverture varie par table: toujours vérifier les mois disponibles avant une comparaison annuelle.\n\n"
             f"━━ TABLES DISPONIBLES (Fabric SQL Analytics Endpoint) ━━━━━━━━\n"
             f"Tables : {ds_list}\n"
             f"TABLE PAR DÉFAUT : [dbo_GOLD].[{active}]\n\n"
+            f"{business_catalog}\n\n"
         )
 
         sql_rules = (
@@ -881,7 +957,7 @@ class DataAnalyticsAgent(BaseAgent):
             "1. Utiliser `sql(query)` — JAMAIS `pd.read_sql`, `read_excel`, `read_csv` (bloqués).\n"
             "2. Préfixer toutes les tables avec [dbo_GOLD].\n"
             "3. AGRÉGER côté SQL (GROUP BY, SUM, COUNT, TOP N) — jamais ramener millions de lignes.\n"
-            "4. Filtres temporels : `WHERE YEAR(date_stat) = 2025 AND MONTH(date_stat) = 7`.\n"
+            "4. Filtres temporels : `WHERE date_stat IS NOT NULL AND YEAR(date_stat) = 2025 AND MONTH(date_stat) = 7`.\n"
             "5. Pré-loaded : pd, np, px, go, to_md(df), MONTH_NAMES_FR, chart_* functions, save_chart.\n"
             "6. Tableaux : `print(to_md(result))`.\n"
             "7. ⚠️ GRAPHIQUES OBLIGATOIRES : Si l'utilisateur mentionne 'graphique', 'graph', 'chart',\n"
@@ -941,13 +1017,13 @@ class DataAnalyticsAgent(BaseAgent):
             "EXEMPLE 2 — DEUX graphiques (évolution + comparaison):\n"
             "```python\n"
             "# Graphique 1 : Évolution mensuelle Casablanca\n"
-            "evo = sql(\"SELECT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois, SUM(nuitees) AS nuitees FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE ville_name='Casablanca' AND YEAR(date_stat) BETWEEN 2024 AND 2026 GROUP BY YEAR(date_stat), MONTH(date_stat) ORDER BY annee, mois\")\n"
+            "evo = sql(\"SELECT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois, SUM(nuitees) AS nuitees FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE date_stat IS NOT NULL AND UPPER(province_name) LIKE '%CASABLANCA%' AND YEAR(date_stat) BETWEEN 2024 AND 2026 GROUP BY YEAR(date_stat), MONTH(date_stat) ORDER BY annee, mois\")\n"
             "evo['periode'] = evo['annee'].astype(str) + '-' + evo['mois'].astype(str).str.zfill(2)\n"
             "fig1 = chart_line(evo, x='periode', y='nuitees', title='Évolution mensuelle des nuitées Casablanca', subtitle='2024-2026')\n"
             "save_chart(fig1, 'evolution_casablanca')\n\n"
             "# Graphique 2 : Comparaison entre villes\n"
-            "comp = sql(\"SELECT ville_name AS ville, YEAR(date_stat) AS annee, SUM(nuitees) AS nuitees FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE ville_name IN ('Casablanca','Marrakech','Agadir','Rabat') AND YEAR(date_stat) BETWEEN 2024 AND 2026 GROUP BY ville_name, YEAR(date_stat) ORDER BY annee, ville\")\n"
-            "fig2 = chart_bar(comp, x='annee', y='nuitees', color='ville', title='Comparaison nuitées par ville', subtitle='Casablanca vs Marrakech vs Agadir vs Rabat')\n"
+            "comp = sql(\"SELECT province_name AS province, YEAR(date_stat) AS annee, SUM(nuitees) AS nuitees FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE date_stat IS NOT NULL AND (UPPER(province_name) LIKE '%CASABLANCA%' OR UPPER(province_name) LIKE '%MARRAKECH%' OR UPPER(province_name) LIKE '%AGADIR%' OR UPPER(province_name) LIKE '%RABAT%') AND YEAR(date_stat) BETWEEN 2024 AND 2026 GROUP BY province_name, YEAR(date_stat) ORDER BY annee, province\")\n"
+            "fig2 = chart_bar(comp, x='annee', y='nuitees', color='province', title='Comparaison nuitées par province', subtitle='Casablanca vs Marrakech vs Agadir vs Rabat')\n"
             "save_chart(fig2, 'comparaison_villes')\n"
             "```\n\n"
             "PALETTES DISPONIBLES: PREMIUM_COLORS['primary'], ['morocco_gradient'], ['ocean_gradient'], ['sunset_gradient']\n\n"
@@ -986,15 +1062,15 @@ class DataAnalyticsAgent(BaseAgent):
             "  FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] f\n"
             "  JOIN [dbo_GOLD].[gld_dim_categories_classements] dc\n"
             "    ON dc.categorie_name = f.categorie_name\n"
-            "  WHERE YEAR(f.date_stat) = 2024\n"
+            "  WHERE f.date_stat IS NOT NULL AND YEAR(f.date_stat) = 2024\n"
             "  GROUP BY dc.type_eht_libelle ORDER BY [Nuitées] DESC;\n\n"
             "# Mois disponibles pour 2026 (TOUJOURS utiliser pour vérifier la couverture)\n"
             "# APF :\n"
-            "apf_months = sql(\"SELECT DISTINCT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois FROM [dbo_GOLD].[fact_statistiques_apf] WHERE YEAR(date_stat) = 2026 ORDER BY mois\")\n"
+            "apf_months = sql(\"SELECT DISTINCT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois FROM [dbo_GOLD].[fact_statistiques_apf] WHERE date_stat IS NOT NULL AND YEAR(date_stat) = 2026 ORDER BY mois\")\n"
             "apf_months['Mois (FR)'] = apf_months['mois'].map(MONTH_NAMES_FR)  # ← utiliser MONTH_NAMES_FR, JAMAIS CASE SQL\n"
             "print(to_md(apf_months))\n"
             "# Hébergement :\n"
-            "eht_months = sql(\"SELECT DISTINCT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE YEAR(date_stat) = 2026 ORDER BY mois\")\n"
+            "eht_months = sql(\"SELECT DISTINCT YEAR(date_stat) AS annee, MONTH(date_stat) AS mois FROM [dbo_GOLD].[fact_statistiqueshebergementnationaliteestimees] WHERE date_stat IS NOT NULL AND YEAR(date_stat) = 2026 ORDER BY mois\")\n"
             "eht_months['Mois (FR)'] = eht_months['mois'].map(MONTH_NAMES_FR)\n"
             "print(to_md(eht_months))\n"
         )
@@ -1648,39 +1724,263 @@ class DataAnalyticsAgent(BaseAgent):
                 + _df_to_markdown(evo_display)
                 + "\n\n## Comparaison villes\n"
                 + _df_to_markdown(comp_display)
-                + "\n\nPerimetre: hebergement classe EHTC/STDN + estimatif; villes/provinces rapprochees via province_name. "
+                + f"\n\nPerimetre: {HEBERGEMENT_SCOPE_LABEL}; villes/provinces rapprochees via province_name. "
                 "Les arrivees APF ne sont pas un perimetre ville."
             )
         except Exception as e:
             logger.debug("Deterministic city comparison failed: %s", e)
             return None
 
+    def _try_simple_cube_answer(
+        self,
+        user_message: str,
+        domain_context: Optional[str],
+        parsed: Dict[str, object],
+    ) -> Optional[str]:
+        """Deprecated: KPI answers now query Fabric directly instead of using a value cache."""
+        return None
+        if not getattr(self, "simple_kpi_cube", None):
+            return None
+
+        year = parsed.get("year")
+        month_info = parsed.get("month_info")
+        has_chart = bool(parsed.get("has_chart"))
+        asks_arrivals = bool(parsed.get("asks_arrivals"))
+        asks_hotel = bool(parsed.get("asks_hotel"))
+        asks_nights = bool(parsed.get("asks_nights"))
+        asks_dms = bool(parsed.get("asks_dms"))
+        asks_apf = bool(parsed.get("asks_apf"))
+        asks_region = bool(parsed.get("asks_region"))
+        asks_top_country = bool(parsed.get("asks_top_country"))
+        asks_monthly = bool(parsed.get("asks_monthly"))
+        asks_voie = bool(parsed.get("asks_voie"))
+        asks_type_hebergement = bool(parsed.get("asks_type_hebergement"))
+        asks_delegation = bool(parsed.get("asks_delegation"))
+
+        if has_chart or asks_region or asks_top_country or asks_monthly or asks_voie or asks_type_hebergement or asks_delegation:
+            return None
+
+        def _apf_month_section(query_year: int, month_num: int) -> Optional[str]:
+            row = self._cube_month_row("apf", query_year, month_num)
+            if row is None:
+                return None
+            df = pd.DataFrame([{
+                "MRE": row.get("mre", 0),
+                "TES": row.get("tes", 0),
+                "Arrivees APF": row.get("arrivees_apf", 0),
+            }])
+            return "APF/DGSN:\n" + _df_to_markdown(df)
+
+        def _hbg_month_section(query_year: int, month_num: int) -> Optional[str]:
+            row = self._cube_month_row("hebergement", query_year, month_num)
+            if row is None:
+                return None
+            df = pd.DataFrame([{
+                "Arrivees hotelieres": row.get("arrivees_hotelieres", 0),
+                "Nuitees": row.get("nuitees", 0),
+            }])
+            return "Hebergement estime:\n" + _df_to_markdown(df)
+
+        if month_info and (asks_arrivals or asks_nights or asks_dms):
+            month_num, month_name = month_info
+            domain_for_default = "hebergement" if asks_hotel or asks_nights or asks_dms or domain_context == "hebergement" else "apf"
+            query_year = int(year or self._cube_latest_year(domain_for_default) or self._cube_latest_year("apf") or 0)
+            if not query_year:
+                return None
+
+            if asks_dms:
+                row = self._cube_month_row("hebergement", query_year, month_num)
+                if row is None:
+                    return None
+                arrivals = float(row.get("arrivees_hotelieres") or 0)
+                nights = float(row.get("nuitees") or 0)
+                dms = nights / arrivals if arrivals else 0
+                return (
+                    f"## DMS - {month_name} {query_year}\n"
+                    f"La **DMS** est de **{dms:.2f} nuits**.\n\n"
+                    f"Calcul: **{self._fmt_num(nights)} nuitees** / **{self._fmt_num(arrivals)} arrivees hotelieres**.\n\n"
+                    f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                )
+
+            sections: List[str] = []
+            section_types: List[str] = []
+            if asks_nights or asks_hotel or domain_context == "hebergement":
+                hbg = _hbg_month_section(query_year, month_num)
+                if hbg:
+                    sections.append(hbg)
+                    section_types.append("hebergement")
+            elif asks_apf or domain_context == "apf":
+                apf = _apf_month_section(query_year, month_num)
+                if apf:
+                    sections.append(apf)
+                    section_types.append("apf")
+            elif asks_arrivals:
+                apf = _apf_month_section(query_year, month_num)
+                hbg = _hbg_month_section(query_year, month_num)
+                if apf:
+                    sections.append(apf)
+                    section_types.append("apf")
+                if hbg:
+                    sections.append(hbg)
+                    section_types.append("hebergement")
+
+            if not sections:
+                return None
+            default_note = "" if year else " (annee la plus recente disponible)"
+            if section_types == ["hebergement"]:
+                title = f"## {'Nuitees' if asks_nights and not asks_arrivals else 'Arrivees hotelieres'} - {month_name} {query_year}{default_note}"
+                scope = f"\nPerimetre: {HEBERGEMENT_SCOPE_LABEL}."
+            elif section_types == ["apf"]:
+                title = f"## Arrivees APF - {month_name} {query_year}{default_note}"
+                scope = f"\nPerimetre: {APF_SCOPE_LABEL}."
+            else:
+                title = f"## Arrivées - {month_name} {query_year}{default_note}"
+                scope = "\nPerimetres separes: APF = postes frontieres; hebergement = check-ins des etablissements classes."
+            return title + "\n" + "\n\n".join(sections) + scope
+
+        if year and (asks_arrivals or asks_nights or asks_dms):
+            query_year = int(year)
+            if asks_dms:
+                hbg = self._cube_year_sum("hebergement", query_year)
+                if not hbg:
+                    return None
+                arrivals = float(hbg["arrivees_hotelieres"] or 0)
+                nights = float(hbg["nuitees"] or 0)
+                dms = nights / arrivals if arrivals else 0
+                return (
+                    f"## DMS - {query_year}\n"
+                    f"La **DMS (Duree Moyenne de Sejour)** est de **{dms:.2f} nuits**.\n\n"
+                    f"Calcul: **{self._fmt_num(nights)} nuitees** / **{self._fmt_num(arrivals)} arrivees hotelieres**.\n\n"
+                    f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}. Cette DMS ne doit pas etre calculee avec les arrivees APF."
+                )
+
+            if asks_nights:
+                hbg = self._cube_year_sum("hebergement", query_year)
+                if not hbg:
+                    return None
+                return (
+                    f"En **{query_year}**, les **nuitees** dans les etablissements d'hebergement classes "
+                    f"s'elevent a **{self._fmt_num(hbg['nuitees'])}**.\n\n"
+                    f"Arrivees hotelieres associees: **{self._fmt_num(hbg['arrivees_hotelieres'])}**.\n\n"
+                    f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                    + self._partial_period_note(HEBERGEMENT_TABLE, query_year, "hebergement")
+                )
+
+            if asks_hotel or domain_context == "hebergement":
+                hbg = self._cube_year_sum("hebergement", query_year)
+                if not hbg:
+                    return None
+                return (
+                    f"En **{query_year}**, les **arrivees hotelieres** dans les etablissements d'hebergement classes "
+                    f"s'elevent a **{self._fmt_num(hbg['arrivees_hotelieres'])}**.\n\n"
+                    f"Nuitees associees: **{self._fmt_num(hbg['nuitees'])}**.\n\n"
+                    f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                    + self._partial_period_note(HEBERGEMENT_TABLE, query_year, "hebergement")
+                )
+
+            if asks_apf or domain_context == "apf":
+                apf = self._cube_year_sum("apf", query_year)
+                if not apf:
+                    return None
+                total = float(apf["arrivees_apf"] or 0)
+                mre = float(apf["mre"] or 0)
+                tes = float(apf["tes"] or 0)
+                response = f"En **{query_year}**, le Maroc a enregistre **{self._fmt_num(total)}** arrivees aux postes frontieres (APF)."
+                if total:
+                    response += (
+                        f"\n\nDetail: **{self._fmt_num(mre)} MRE** ({mre / total * 100:.1f}%) "
+                        f"et **{self._fmt_num(tes)} TES** ({tes / total * 100:.1f}%)."
+                    )
+                return response + f"\n\nPerimetre: {APF_SCOPE_LABEL}." + self._partial_period_note(APF_TABLE, query_year, "APF")
+
+            if asks_arrivals:
+                apf = self._cube_year_sum("apf", query_year)
+                hbg = self._cube_year_sum("hebergement", query_year)
+                sections = []
+                if apf:
+                    sections.append(f"APF/DGSN: **{self._fmt_num(apf['arrivees_apf'])}** arrivees aux postes frontieres.")
+                if hbg:
+                    df = pd.DataFrame([{
+                        "Arrivees hotelieres": hbg["arrivees_hotelieres"],
+                        "Nuitees": hbg["nuitees"],
+                    }])
+                    sections.append("Hebergement estime:\n" + _df_to_markdown(df))
+                if sections:
+                    return (
+                        f"## Arrivées - {query_year}\n"
+                        + "\n\n".join(sections)
+                        + "\n\nNote: la question est ambigue; les arrivees APF et hebergement sont deux perimetres distincts."
+                    )
+
+        return None
+
     def try_official_kpi_answer(self, user_message: str, domain_context: Optional[str] = None) -> Optional[str]:
         """Answer high-frequency official KPI prompts with fixed SQL/templates."""
         if not getattr(self, "_db", None) or self._db.source != "fabric":
             return None
 
+        primary_message = re.split(
+            r"\n\s*\[Contexte de suivi STATOUR\]",
+            user_message or "",
+            maxsplit=1,
+        )[0]
         msg = self._norm_text(user_message)
-        years_all = list(dict.fromkeys(int(y) for y in re.findall(r"\b(20[12]\d)\b", user_message or "")))
+        primary_years = list(dict.fromkeys(int(y) for y in re.findall(r"\b(20[12]\d)\b", primary_message or "")))
+        all_years = list(dict.fromkeys(int(y) for y in re.findall(r"\b(20[12]\d)\b", user_message or "")))
+        years_all = primary_years or all_years
         year = years_all[0] if len(years_all) == 1 else None
-        month_info = self._extract_month_from_text(user_message)
-        apf = self._db._qualify("fact_statistiques_apf")
-        hbg = self._db._qualify("fact_statistiqueshebergementnationaliteestimees")
+        month_info = self._extract_month_from_text(primary_message) or self._extract_month_from_text(user_message)
+        apf = self._db._qualify(APF_TABLE)
+        hbg = self._db._qualify(HEBERGEMENT_TABLE)
 
         has_chart = any(k in msg for k in ["graphique", "graphe", "chart", "courbe", "visualis", "plot"])
         asks_arrivals = any(k in msg for k in ["arrivee", "arrivees", "touriste", "touristes"])
         asks_hotel = any(k in msg for k in ["hoteliere", "hotelieres", "hotel", "hebergement", "ehtc"])
-        asks_nights = any(k in msg for k in ["nuitee", "nuitees", "stdn"])
+        asks_nights = any(k in msg for k in ["nuitee", "nuitees"])
         asks_dms = bool(re.search(r"\bdms\b", msg)) or "duree moyenne de sejour" in msg
         asks_apf = any(k in msg for k in ["apf", "frontiere", "frontieres", "poste", "mre", "tes", "dgsn"])
         asks_region = "region" in msg
         asks_top_country = "top" in msg and any(k in msg for k in ["pays", "residence", "nationalite"])
         asks_monthly = any(k in msg for k in ["par mois", "mensuel", "mensuelle", "mois"])
         asks_voie = any(k in msg for k in ["voie", "aerien", "aeroport", "maritime", "terrestre"])
+        asks_type_hebergement = any(k in msg for k in ["type hebergement", "type d hebergement", "categorie", "categories"])
+        asks_delegation = "delegation" in msg
 
         city_answer = self._try_city_comparison_answer(user_message, hbg)
         if city_answer:
             return city_answer
+
+        if month_info and (asks_nights or asks_dms) and not has_chart:
+            month_num, month_name = month_info
+            query_year = year or self._latest_complete_hebergement_year()
+            if query_year:
+                try:
+                    df = self._cached_safe_query(
+                        f"SELECT SUM(nuitees) AS nuitees, SUM(arrivees) AS arrivees "
+                        f"FROM {hbg} WHERE date_stat IS NOT NULL "
+                        f"AND YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
+                    )
+                    if not df.empty:
+                        row = df.iloc[0]
+                        nights = float(row["nuitees"] or 0)
+                        arrivals = float(row["arrivees"] or 0)
+                        default_note = "" if year else " (derniere annee complete disponible)"
+                        if asks_dms:
+                            dms = nights / arrivals if arrivals else 0
+                            return (
+                                f"## DMS - {month_name} {query_year}{default_note}\n"
+                                f"La **DMS** est de **{dms:.2f} nuits**.\n\n"
+                                f"Calcul: **{self._fmt_num(nights)} nuitees** / **{self._fmt_num(arrivals)} arrivees hotelieres**.\n\n"
+                                f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                            )
+                        return (
+                            f"## Nuitees - {month_name} {query_year}{default_note}\n"
+                            f"Les **nuitees** s'elevent a **{self._fmt_num(nights)}**.\n\n"
+                            f"Arrivees hotelieres associees: **{self._fmt_num(arrivals)}**.\n\n"
+                            f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                        )
+                except Exception as e:
+                    logger.debug("Deterministic monthly nights/DMS failed: %s", e)
 
         if month_info and asks_arrivals and not has_chart:
             month_num, month_name = month_info
@@ -1688,47 +1988,100 @@ class DataAnalyticsAgent(BaseAgent):
             if query_year:
                 try:
                     sections = []
+                    section_types = []
                     if asks_apf or (not asks_hotel and domain_context != "hebergement"):
-                        apf_df = self._db.safe_query(
+                        apf_df = self._cached_safe_query(
                             f"SELECT SUM(mre) AS [MRE], SUM(tes) AS [TES], SUM(mre + tes) AS [Arrivees APF] "
-                            f"FROM {apf} WHERE YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
+                            f"FROM {apf} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
                         )
                         if not apf_df.empty:
                             sections.append("APF/DGSN:\n" + _df_to_markdown(apf_df))
+                            section_types.append("apf")
                     if asks_hotel or (not asks_apf and domain_context != "apf"):
-                        hbg_df = self._db.safe_query(
+                        hbg_df = self._cached_safe_query(
                             f"SELECT SUM(arrivees) AS [Arrivees hotelieres], SUM(nuitees) AS [Nuitees] "
-                            f"FROM {hbg} WHERE YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
+                            f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {query_year} AND MONTH(date_stat) = {month_num}"
                         )
                         if not hbg_df.empty:
-                            sections.append("Hebergement classe:\n" + _df_to_markdown(hbg_df))
+                            sections.append("Hebergement estime:\n" + _df_to_markdown(hbg_df))
+                            section_types.append("hebergement")
                     if sections:
                         default_note = "" if year else " (annee la plus recente disponible)"
+                        if section_types == ["hebergement"]:
+                            title = f"## Arrivees hotelieres - {month_name} {query_year}{default_note}"
+                            scope = f"\nPerimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                        elif section_types == ["apf"]:
+                            title = f"## Arrivees APF - {month_name} {query_year}{default_note}"
+                            scope = f"\nPerimetre: {APF_SCOPE_LABEL}."
+                        else:
+                            title = f"## Arriv\u00e9es - {month_name} {query_year}{default_note}"
+                            scope = "\nPerimetres separes: APF = postes frontieres; hebergement = check-ins des etablissements classes."
                         return (
-                            f"## Arriv\u00e9es - {month_name} {query_year}{default_note}\n"
+                            title + "\n"
                             + "\n\n".join(sections)
-                            + "\nPerimetres separes: APF = postes frontieres; hebergement = etablissements classes."
+                            + scope
                         )
                 except Exception as e:
                     logger.debug("Deterministic monthly arrivals failed: %s", e)
 
+        if year and asks_nights and not asks_region and not asks_type_hebergement and not asks_top_country and not has_chart:
+            try:
+                df = self._cached_safe_query(
+                    f"SELECT SUM(nuitees) AS nuitees, SUM(arrivees) AS arrivees, "
+                    f"COUNT(DISTINCT MONTH(date_stat)) AS mois_count, "
+                    f"MIN(MONTH(date_stat)) AS min_mois, MAX(MONTH(date_stat)) AS max_mois "
+                    f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year}"
+                )
+                if not df.empty:
+                    row = df.iloc[0]
+                    return (
+                        f"En **{year}**, les **nuitees** dans les etablissements d'hebergement classes "
+                        f"s'elevent a **{self._fmt_num(row['nuitees'])}**.\n\n"
+                        f"Arrivees hotelieres associees: **{self._fmt_num(row['arrivees'])}**.\n\n"
+                        f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                        + self._partial_period_note_from_coverage(
+                            year, "hebergement", row.get("mois_count"), row.get("min_mois"), row.get("max_mois")
+                        )
+                    )
+            except Exception as e:
+                logger.debug("Deterministic hebergement nights failed: %s", e)
+
         if year and asks_apf and asks_arrivals and not has_chart:
-            total = self.kpi_cache.total_for_year(year) if self.kpi_cache else None
-            if total is not None:
-                mre = self.kpi_cache.get("mre_by_year", {}).get(year, 0)
-                tes = self.kpi_cache.get("tes_by_year", {}).get(year, 0)
+            try:
+                df = self._cached_safe_query(
+                    f"SELECT SUM(mre) AS mre, SUM(tes) AS tes, SUM(mre + tes) AS arrivees_apf, "
+                    f"COUNT(DISTINCT MONTH(date_stat)) AS mois_count, "
+                    f"MIN(MONTH(date_stat)) AS min_mois, MAX(MONTH(date_stat)) AS max_mois "
+                    f"FROM {apf} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year}"
+                )
+                if df.empty:
+                    return None
+                row = df.iloc[0]
+                total = float(row["arrivees_apf"] or 0)
+                mre = float(row["mre"] or 0)
+                tes = float(row["tes"] or 0)
                 response = f"En **{year}**, le Maroc a enregistre **{self._fmt_num(total)}** arrivees aux postes frontieres (APF)."
                 if mre or tes:
                     mre_pct = round(mre / total * 100, 1) if total else 0
                     tes_pct = round(tes / total * 100, 1) if total else 0
                     response += f"\n\nDetail: **{self._fmt_num(mre)} MRE** ({mre_pct}%) et **{self._fmt_num(tes)} TES** ({tes_pct}%)."
-                return response + "\n\nPerimetre: APF/DGSN, arrivees aux postes frontieres."
+                return (
+                    response
+                    + f"\n\nPerimetre: {APF_SCOPE_LABEL}."
+                    + self._partial_period_note_from_coverage(
+                        year, "APF", row.get("mois_count"), row.get("min_mois"), row.get("max_mois")
+                    )
+                )
+            except Exception as e:
+                logger.debug("Deterministic APF arrivals failed: %s", e)
 
-        if year and asks_hotel and asks_arrivals and not has_chart:
+        if year and asks_hotel and asks_arrivals and not asks_type_hebergement and not asks_delegation and not has_chart:
             try:
-                df = self._db.safe_query(
-                    f"SELECT SUM(arrivees) AS arrivees_hotelieres, SUM(nuitees) AS nuitees "
-                    f"FROM {hbg} WHERE YEAR(date_stat) = {year}"
+                df = self._cached_safe_query(
+                    f"SELECT SUM(arrivees) AS arrivees_hotelieres, SUM(nuitees) AS nuitees, "
+                    f"COUNT(DISTINCT MONTH(date_stat)) AS mois_count, "
+                    f"MIN(MONTH(date_stat)) AS min_mois, MAX(MONTH(date_stat)) AS max_mois "
+                    f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year}"
                 )
                 if not df.empty:
                     row = df.iloc[0]
@@ -1736,23 +2089,30 @@ class DataAnalyticsAgent(BaseAgent):
                         f"En **{year}**, les **arrivees hotelieres** dans les etablissements d'hebergement classes "
                         f"s'elevent a **{self._fmt_num(row['arrivees_hotelieres'])}**.\n\n"
                         f"Nuitees associees: **{self._fmt_num(row['nuitees'])}**.\n\n"
-                        "Perimetre: hebergement classe EHTC/STDN + estimatif."
+                        f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                        + self._partial_period_note_from_coverage(
+                            year, "hebergement", row.get("mois_count"), row.get("min_mois"), row.get("max_mois")
+                        )
                     )
             except Exception as e:
                 logger.debug("Deterministic hotel arrivals failed: %s", e)
 
         if year and asks_arrivals and not asks_apf and not asks_hotel and not has_chart:
             try:
-                apf_total = self.kpi_cache.total_for_year(year) if self.kpi_cache else None
-                hbg_df = self._db.safe_query(
+                apf_df = self._cached_safe_query(
+                    f"SELECT SUM(mre + tes) AS [Arrivees APF] "
+                    f"FROM {apf} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year}"
+                )
+                hbg_df = self._cached_safe_query(
                     f"SELECT SUM(arrivees) AS [Arrivees hotelieres], SUM(nuitees) AS [Nuitees] "
-                    f"FROM {hbg} WHERE YEAR(date_stat) = {year}"
+                    f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year}"
                 )
                 sections = []
-                if apf_total is not None:
+                if not apf_df.empty:
+                    apf_total = float(apf_df.iloc[0]["Arrivees APF"] or 0)
                     sections.append(f"APF/DGSN: **{self._fmt_num(apf_total)}** arrivees aux postes frontieres.")
                 if not hbg_df.empty:
-                    sections.append("Hebergement classe:\n" + _df_to_markdown(hbg_df))
+                    sections.append("Hebergement estime:\n" + _df_to_markdown(hbg_df))
                 if sections:
                     return (
                         f"## Arriv\u00e9es - {year}\n"
@@ -1764,38 +2124,60 @@ class DataAnalyticsAgent(BaseAgent):
 
         if year and asks_nights and asks_region:
             try:
-                df = self._db.safe_query(
+                df = self._cached_safe_query(
                     f"SELECT region_name AS [Region], SUM(nuitees) AS [Nuitees] "
-                    f"FROM {hbg} WHERE YEAR(date_stat) = {year} "
+                    f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year} "
                     f"GROUP BY region_name ORDER BY [Nuitees] DESC"
                 )
                 if not df.empty:
-                    return f"## Nuitees par region - {year}\n" + _df_to_markdown(df) + "\nPerimetre: hebergement classe EHTC/STDN + estimatif."
+                    return f"## Nuitees par region - {year}\n" + _df_to_markdown(df) + f"\nPerimetre: {HEBERGEMENT_SCOPE_LABEL}."
             except Exception as e:
                 logger.debug("Deterministic nuitées by region failed: %s", e)
 
+        if year and asks_type_hebergement and (asks_nights or asks_arrivals or asks_hotel):
+            try:
+                metric_order = "[Nuitees]" if asks_nights and not asks_arrivals else "[Arrivees hotelieres]"
+                df = self._cached_safe_query(
+                    f"SELECT COALESCE(dc.type_eht_libelle, f.categorie_name, 'Non precise') AS [Type hebergement], "
+                    f"SUM(f.arrivees) AS [Arrivees hotelieres], SUM(f.nuitees) AS [Nuitees] "
+                    f"FROM {hbg} f "
+                    f"LEFT JOIN {self._db._qualify('gld_dim_categories_classements')} dc "
+                    f"ON dc.categorie_name = f.categorie_name "
+                    f"WHERE f.date_stat IS NOT NULL AND YEAR(f.date_stat) = {year} "
+                    f"GROUP BY COALESCE(dc.type_eht_libelle, f.categorie_name, 'Non precise') "
+                    f"ORDER BY {metric_order} DESC"
+                )
+                if not df.empty:
+                    return (
+                        f"## Hebergement par type - {year}\n"
+                        + _df_to_markdown(df)
+                        + f"\nPerimetre: {HEBERGEMENT_SCOPE_LABEL}."
+                    )
+            except Exception as e:
+                logger.debug("Deterministic hebergement by type failed: %s", e)
+
         if year and asks_voie and not has_chart:
             try:
-                df = self._db.safe_query(
+                df = self._cached_safe_query(
                     f"SELECT voie AS [Voie], SUM(mre) AS [MRE], SUM(tes) AS [TES], "
                     f"SUM(mre + tes) AS [Arrivees APF] "
-                    f"FROM {apf} WHERE YEAR(date_stat) = {year} "
+                    f"FROM {apf} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year} "
                     f"GROUP BY voie ORDER BY [Arrivees APF] DESC"
                 )
                 if not df.empty:
                     total = float(df["Arrivees APF"].sum() or 0)
                     if total:
                         df["Part (%)"] = (df["Arrivees APF"] / total * 100).round(1)
-                    return f"## Repartition par voie APF - {year}\n" + _df_to_markdown(df) + "\nPerimetre: APF/DGSN."
+                    return f"## Repartition par voie APF - {year}\n" + _df_to_markdown(df) + f"\nPerimetre: {APF_SCOPE_LABEL}."
             except Exception as e:
                 logger.debug("Deterministic APF by voie failed: %s", e)
 
         if year and asks_top_country and (asks_apf or domain_context == "apf" or (not asks_hotel and not asks_nights)):
             try:
-                df = self._db.safe_query(
+                df = self._cached_safe_query(
                     f"SELECT TOP 10 nationalite AS [Pays de residence], "
                     f"SUM(mre) AS [MRE], SUM(tes) AS [TES], SUM(mre + tes) AS [Arrivees APF] "
-                    f"FROM {apf} WHERE YEAR(date_stat) = {year} "
+                    f"FROM {apf} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year} "
                     f"GROUP BY nationalite ORDER BY [Arrivees APF] DESC"
                 )
                 if not df.empty:
@@ -1805,10 +2187,10 @@ class DataAnalyticsAgent(BaseAgent):
 
         if year and asks_top_country and (asks_hotel or asks_nights or domain_context == "hebergement"):
             try:
-                df = self._db.safe_query(
+                df = self._cached_safe_query(
                     f"SELECT TOP 10 nationalite_name AS [Pays de residence], "
                     f"SUM(arrivees) AS [Arrivees hotelieres], SUM(nuitees) AS [Nuitees] "
-                    f"FROM {hbg} WHERE YEAR(date_stat) = {year} "
+                    f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year} "
                     f"GROUP BY nationalite_name ORDER BY [Arrivees hotelieres] DESC"
                 )
                 if not df.empty:
@@ -1816,32 +2198,36 @@ class DataAnalyticsAgent(BaseAgent):
             except Exception as e:
                 logger.debug("Deterministic HBG top countries failed: %s", e)
 
-        if year and has_chart and asks_arrivals and asks_monthly:
+        if year and has_chart and (asks_arrivals or asks_nights) and asks_monthly:
             try:
-                if asks_hotel or domain_context == "hebergement":
-                    df = self._db.safe_query(
-                        f"SELECT MONTH(date_stat) AS mois, SUM(arrivees) AS arrivees "
-                        f"FROM {hbg} WHERE YEAR(date_stat) = {year} "
+                if asks_nights or asks_hotel or domain_context == "hebergement":
+                    metric_col = "nuitees" if asks_nights and not asks_arrivals else "arrivees"
+                    select_metric = "SUM(nuitees)" if metric_col == "nuitees" else "SUM(arrivees)"
+                    df = self._cached_safe_query(
+                        f"SELECT MONTH(date_stat) AS mois, {select_metric} AS valeur "
+                        f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year} "
                         f"GROUP BY MONTH(date_stat) ORDER BY mois"
                     )
-                    title = f"Arrivees hotelieres par mois - {year}"
-                    scope = "hebergement classe EHTC/STDN + estimatif"
+                    title = f"{'Nuitees' if metric_col == 'nuitees' else 'Arrivees hotelieres'} par mois - {year}"
+                    display_metric = "Nuitees" if metric_col == "nuitees" else "Arrivees"
+                    scope = HEBERGEMENT_SCOPE_LABEL
                 else:
-                    df = self._db.safe_query(
-                        f"SELECT MONTH(date_stat) AS mois, SUM(mre + tes) AS arrivees "
-                        f"FROM {apf} WHERE YEAR(date_stat) = {year} "
+                    df = self._cached_safe_query(
+                        f"SELECT MONTH(date_stat) AS mois, SUM(mre + tes) AS valeur "
+                        f"FROM {apf} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {year} "
                         f"GROUP BY MONTH(date_stat) ORDER BY mois"
                     )
                     title = f"Arrivees APF par mois - {year}"
-                    scope = "APF/DGSN, postes frontieres"
+                    display_metric = "Arrivees"
+                    scope = APF_SCOPE_LABEL
                 if not df.empty:
                     df["mois_fr"] = df["mois"].astype(int).map(MONTH_NAMES_FR)
-                    chart_path = self._write_monthly_chart(df, title, "mois_fr", "arrivees")
+                    chart_path = self._write_monthly_chart(df, title, "mois_fr", "valeur")
                     if chart_path:
                         self.last_chart_paths = [chart_path]
                     if not chart_path:
                         return "⚠️ Graphique demande, mais la generation Plotly a echoue. Les donnees sont disponibles:\n\n" + _df_to_markdown(df)
-                    display = df[["mois_fr", "arrivees"]].rename(columns={"mois_fr": "Mois", "arrivees": "Arrivees"})
+                    display = df[["mois_fr", "valeur"]].rename(columns={"mois_fr": "Mois", "valeur": display_metric})
                     return f"## Graphique créé\n{title}.\n\n" + _df_to_markdown(display) + f"\nPérimètre : {scope}."
             except Exception as e:
                 logger.debug("Deterministic monthly chart failed: %s", e)
@@ -1850,9 +2236,11 @@ class DataAnalyticsAgent(BaseAgent):
             dms_year = year or self._latest_complete_hebergement_year()
             if dms_year:
                 try:
-                    df = self._db.safe_query(
-                        f"SELECT SUM(nuitees) AS nuitees, SUM(arrivees) AS arrivees "
-                        f"FROM {hbg} WHERE YEAR(date_stat) = {dms_year}"
+                    df = self._cached_safe_query(
+                        f"SELECT SUM(nuitees) AS nuitees, SUM(arrivees) AS arrivees, "
+                        f"COUNT(DISTINCT MONTH(date_stat)) AS mois_count, "
+                        f"MIN(MONTH(date_stat)) AS min_mois, MAX(MONTH(date_stat)) AS max_mois "
+                        f"FROM {hbg} WHERE date_stat IS NOT NULL AND YEAR(date_stat) = {dms_year}"
                     )
                     if not df.empty:
                         row = df.iloc[0]
@@ -1864,12 +2252,29 @@ class DataAnalyticsAgent(BaseAgent):
                             f"## DMS - {dms_year}{default_note}\n"
                             f"La **DMS (Duree Moyenne de Sejour)** est de **{dms:.2f} nuits**.\n\n"
                             f"Calcul: **{self._fmt_num(nights)} nuitees** / **{self._fmt_num(arrivals)} arrivees hotelieres**.\n\n"
-                            "Perimetre: hebergement classe EHTC/STDN + estimatif. Cette DMS ne doit pas etre calculee avec les arrivees APF."
+                            f"Perimetre: {HEBERGEMENT_SCOPE_LABEL}. Cette DMS ne doit pas etre calculee avec les arrivees APF."
+                            + self._partial_period_note_from_coverage(
+                                dms_year, "hebergement", row.get("mois_count"), row.get("min_mois"), row.get("max_mois")
+                            )
                         )
                 except Exception as e:
                     logger.debug("Deterministic DMS failed: %s", e)
 
         return None
+
+    def try_direct_kpi_answer(self, user_message: str, domain_context: Optional[str] = None) -> Optional[str]:
+        """Fast-path entrypoint for the orchestrator.
+
+        It only returns deterministic SQL/template answers. It never calls the
+        LLM, so the orchestrator can safely try it before the plan/execute flow.
+        """
+        self.last_chart_paths = []
+        answer = self.try_official_kpi_answer(user_message, domain_context=domain_context)
+        if answer:
+            if hasattr(self, "conversation_history"):
+                self.conversation_history.append({"role": "user", "content": user_message})
+                self.conversation_history.append({"role": "assistant", "content": answer})
+        return answer
 
     def chat(self, user_message: str, domain_context: Optional[str] = None) -> str:
         """

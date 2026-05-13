@@ -231,7 +231,7 @@ class ExecutiveInsightAgent:
             "- Requêtes Fabric read-only via sql(query) uniquement.\n"
             "- Agréger dans SQL; ne jamais faire SELECT * sans TOP.\n"
             "- Séparer APF, hébergement, nuitées, arrivées hôtelières, recettes, taux d'occupation.\n"
-            "- Comparer seulement des périodes homogènes; si 2026 est partielle, comparer Jan-Fév vs Jan-Fév.\n"
+            "- Comparer seulement des périodes homogènes; si 2026 est partielle, aligner les années sur les mêmes mois disponibles.\n"
             "- Identifier marchés gagnants/perdants si les colonnes le permettent.\n"
             "- Lister clairement les données absentes.\n"
             "- Rester factuel: pas d'explication externe, pas de recommandation.\n"

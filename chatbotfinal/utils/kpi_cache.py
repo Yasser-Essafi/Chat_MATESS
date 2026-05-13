@@ -227,13 +227,13 @@ class KPICache:
 
         # ── DOMAINE HÉBERGEMENT → bypass cache (KPI cache ne couvre que APF) ──
         # Le cache est construit uniquement depuis fact_statistiques_apf (MRE+TES).
-        # Toute question relative aux nuitées, hébergement, EHTC ou STDN doit aller
+        # Toute question relative aux nuitées, hébergement ou EHTC doit aller
         # au LLM analytics pour qu'il interroge fact_statistiqueshebergementnationaliteestimees.
         _HEBERGEMENT_KW = [
             "nuitée", "nuitee", "nuitées", "nuitees",
             "hébergement", "hebergement",
             "hôtel", "hotel",
-            "ehtc", "stdn",
+            "ehtc",
             "établissement", "etablissement",
             "maison d'hôte", "maison hôte", "maison hotes",
             "camping", "riad",
@@ -241,7 +241,6 @@ class KPICache:
             "arrivée hôt", "arrivee hôt", "arrivées hôt",
             "type d'héberg", "type d heberg",
             "délégation", "delegation",
-            "télédéclaration", "teledeclaration",
         ]
         if any(kw in q for kw in _HEBERGEMENT_KW):
             import re as _re

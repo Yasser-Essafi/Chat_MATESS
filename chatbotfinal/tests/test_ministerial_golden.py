@@ -8,6 +8,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.data_analytics_agent import DataAnalyticsAgent, execute_code_safe
 from agents.executive_insight_agent import ExecutiveInsightAgent
 from agents.prediction_agent import PredictionAgent
+from orchestration.external_impact import _build_event_profile, run_external_impact_analysis, should_handle_external_impact
+
+FORBIDDEN_HBG_SOURCE = "S" + "TDN"
+
+
+class FakeSearchTool:
+    def smart_search(self, query, analysis_type="factual", max_results=5):
+        return [
+            {
+                "title": "Réservations en chute",
+                "url": "https://example.test/moyen-orient",
+                "content": (
+                    "Les frappes israélo-américaines contre l’Iran, "
+                    "déclenchées fin février 2026, ont provoqué une pression "
+                    "sur le secteur du voyage."
+                ),
+            }
+        ]
 
 
 class FakeKpiCache:
@@ -30,6 +48,19 @@ class FakeFabricDb:
 
     def safe_query(self, sql):
         sql_lower = sql.lower()
+        if "fact_statistiques_apf" in sql_lower and "year(date_stat) = 2025" in sql_lower and "sum(mre) as mre" in sql_lower:
+            return pd.DataFrame([{"mre": 9_000_000, "tes": 10_792_604, "arrivees_apf": 19_792_604}])
+        if "fact_statistiques_apf" in sql_lower and "month(date_stat) = 2" in sql_lower and "sum(mre)" in sql_lower:
+            return pd.DataFrame([{"MRE": 598_215, "TES": 774_643, "Arrivees APF": 1_372_858}])
+        if "fact_statistiqueshebergementnationaliteestimees" in sql_lower and "month(date_stat) = 2" in sql_lower and "sum(arrivees)" in sql_lower:
+            return pd.DataFrame([{"Arrivees hotelieres": 1_538_298, "Nuitees": 3_308_725}])
+        if "type_eht_libelle" in sql_lower and "gld_dim_categories_classements" in sql_lower:
+            return pd.DataFrame(
+                [
+                    {"Type hebergement": "Hotels", "Arrivees hotelieres": 10_000, "Nuitees": 24_000},
+                    {"Type hebergement": "Maisons d'hotes", "Arrivees hotelieres": 2_000, "Nuitees": 5_000},
+                ]
+            )
         if "province_name" in sql_lower and "casablanca" in sql_lower and "marrakech" in sql_lower:
             return pd.DataFrame(
                 [
@@ -50,15 +81,17 @@ class FakeFabricDb:
             )
         if "sum(arrivees) as arrivees_hotelieres" in sql_lower and "sum(nuitees)" in sql_lower:
             return pd.DataFrame([{"arrivees_hotelieres": 20_260_175, "nuitees": 44_908_924}])
-        if "count(distinct month" in sql_lower:
+        if "count(distinct month" in sql_lower and "group by year(date_stat) having" in sql_lower:
             return pd.DataFrame([{"annee": 2025, "mois_count": 12}])
+        if "fact_statistiqueshebergementnationaliteestimees" in sql_lower and "year(date_stat) = 2026" in sql_lower and "sum(nuitees) as nuitees" in sql_lower:
+            return pd.DataFrame([{"nuitees": 6_817_662, "arrivees": 3_968_951}])
         if "sum(nuitees) as nuitees" in sql_lower and "sum(arrivees) as arrivees" in sql_lower:
             return pd.DataFrame([{"nuitees": 44_908_924, "arrivees": 20_260_175}])
         if "group by region_name" in sql_lower:
             regions = ["Marrakech-Safi"] + [f"Region {i}" for i in range(2, 13)]
             return pd.DataFrame({"Region": regions, "Nuitees": [19_000_000] + list(range(11_000, 0, -1000))})
         if "group by month" in sql_lower:
-            return pd.DataFrame({"mois": list(range(1, 13)), "arrivees": [1_000_000 + i for i in range(12)]})
+            return pd.DataFrame({"mois": list(range(1, 13)), "valeur": [1_000_000 + i for i in range(12)]})
         if "fact_statistiques_apf" in sql_lower and "group by year" in sql_lower:
             return pd.DataFrame({"annee": [2024, 2025], "arrivees": [2_555_082, 2_697_017]})
         raise AssertionError(f"Unexpected SQL: {sql}")
@@ -75,6 +108,59 @@ def make_analytics_agent():
     return agent
 
 
+def test_external_impact_resolves_specific_event_before_sql_window():
+    message = "est ce que la guerre du moyen orient a impacte le flux et comment ?"
+    profile = _build_event_profile(message, FakeSearchTool())
+
+    assert should_handle_external_impact(message)
+    assert profile.start_date.isoformat() == "2026-02-28"
+    assert (profile.first_observed_year, profile.first_observed_month) == (2026, 3)
+
+
+def test_external_impact_handles_hyphenated_middle_east_and_requested_month():
+    message = "La guerre du Moyen-Orient declenchee fin fevrier a-t-elle impacte les arrivees APF en mars 2026 ?"
+    profile = _build_event_profile(message, FakeSearchTool())
+
+    assert should_handle_external_impact(message)
+    assert profile.label == "guerre au Moyen-Orient"
+    assert profile.start_date.isoformat() == "2026-02-28"
+    assert (profile.analysis_year, profile.analysis_month) == (2026, 3)
+
+
+def test_external_impact_routes_ramadan_and_segment_questions():
+    assert should_handle_external_impact("Est-ce que Ramadan 2025 a perturbe les nuitees et les arrivees hotelieres ?")
+    ramadan = _build_event_profile("Est-ce que Ramadan 2025 a perturbe les nuitees ?", None)
+    assert ramadan.label == "Ramadan"
+    assert ramadan.start_date.isoformat() == "2025-03-01"
+    assert (ramadan.first_observed_year, ramadan.first_observed_month) == (2025, 3)
+
+    segment_prompt = "Compare l'impact du conflit du Moyen-Orient sur MRE versus TES en mars 2026"
+    segment = _build_event_profile(segment_prompt, None)
+    assert should_handle_external_impact(segment_prompt)
+    assert segment.start_date.isoformat() == "2026-02-28"
+    assert segment.segment_requested
+
+
+def test_hypothesis_scenario_is_answered_without_sql():
+    message = "Si les arrivees APF augmentent mais les nuitees stagnent, quelles hypotheses metier faut-il tester ?"
+    result = run_external_impact_analysis(message, db_layer=FakeFabricDb(), search_tool=FakeSearchTool())
+
+    assert should_handle_external_impact(message)
+    assert result["trace"][0]["stage"] == "hypothesis_framework"
+    assert "DMS" in result["response"]
+    assert "MRE/TES" in result["response"]
+
+
+def test_gulf_market_mix_routes_to_external_impact():
+    message = "La guerre du Moyen-Orient a-t-elle change le mix pays de residence sur les marches du Golfe en mars 2026 ?"
+    profile = _build_event_profile(message, None)
+
+    assert should_handle_external_impact(message)
+    assert profile.label == "guerre au Moyen-Orient"
+    assert profile.market_requested
+    assert profile.start_date.isoformat() == "2026-02-28"
+
+
 def test_apf_arrivals_2025_is_apf_only():
     response = make_analytics_agent().try_official_kpi_answer("Combien d'arrivees APF en 2025 ?")
 
@@ -88,6 +174,7 @@ def test_hotel_arrivals_2025_is_hebergement_only():
 
     assert "20,260,175" in response
     assert "hebergement" in response.lower()
+    assert FORBIDDEN_HBG_SOURCE not in response
     assert "MRE" not in response
     assert "TES" not in response
     assert "frontiere" not in response.lower()
@@ -97,9 +184,45 @@ def test_nuitees_by_region_2024_returns_twelve_regions_and_marrakech_first():
     response = make_analytics_agent().try_official_kpi_answer("Donne-moi les nuitees par region en 2024")
 
     assert response.count("| Marrakech-Safi |") == 1
+    assert FORBIDDEN_HBG_SOURCE not in response
     assert response.index("Marrakech-Safi") < response.index("Region 2")
     data_rows = [line for line in response.splitlines() if line.startswith("| ") and not line.startswith("| :")]
     assert len(data_rows) == 13  # header + 12 regions
+
+
+def test_ambiguous_monthly_arrivals_returns_apf_and_hebergement():
+    response = make_analytics_agent().try_official_kpi_answer("Nombre d'arrivees en fevrier 2026 ?")
+
+    assert "Arrivees APF" in response
+    assert "Arrivees hotelieres" in response
+    assert "1,372,858" in response
+    assert "1,538,298" in response
+    assert FORBIDDEN_HBG_SOURCE not in response
+
+
+def test_followup_context_uses_current_year_for_direct_sql():
+    response = make_analytics_agent().try_official_kpi_answer(
+        "et en 2026\n\n"
+        "[Contexte de suivi STATOUR]\n"
+        "Demande analytique precedente: nuitees en 2024\n"
+        "Conserver le meme type de livrable, la meme periode, la meme metrique.",
+        domain_context="hebergement",
+    )
+
+    assert "2026" in response
+    assert "6,817,662" in response
+    assert "2024" not in response
+
+
+def test_hebergement_type_fast_path_uses_category_dimension():
+    response = make_analytics_agent().try_official_kpi_answer(
+        "Donne-moi les arrivees par type d hebergement en 2025"
+    )
+
+    assert "Type hebergement" in response
+    assert "Hotels" in response
+    assert "Maisons d'hotes" in response
+    assert FORBIDDEN_HBG_SOURCE not in response
 
 
 def test_monthly_arrivals_chart_sets_contract_artifact_path():
@@ -108,6 +231,16 @@ def test_monthly_arrivals_chart_sets_contract_artifact_path():
 
     assert "Graphique" in response
     assert "Chart:" not in response
+    assert agent.last_chart_paths == [os.path.join("charts", "golden.html")]
+
+
+def test_monthly_nights_chart_uses_direct_hebergement_path():
+    agent = make_analytics_agent()
+    response = agent.try_official_kpi_answer("Fais un graphique des nuitees par mois en 2024")
+
+    assert "Graphique" in response
+    assert "Nuitees par mois - 2024" in response
+    assert "Nuitees" in response
     assert agent.last_chart_paths == [os.path.join("charts", "golden.html")]
 
 

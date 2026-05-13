@@ -92,7 +92,6 @@ _METRIC_KEYWORDS: Dict[str, List[str]] = {
         r"h[ée]bergement",
         r"\bh[ôo]tel\b",
         r"\behtc\b",
-        r"\bstdn\b",
         r"\bnuit\b",
         r"\bchambre\b",
         r"\bcapacit[ée]\b",

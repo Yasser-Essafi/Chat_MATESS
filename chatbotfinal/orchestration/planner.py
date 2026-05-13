@@ -65,9 +65,9 @@ Tu reçois une question complexe et tu dois créer un plan d'exécution structur
 OUTILS DISPONIBLES:
 1. **sql** — Exécuter des requêtes T-SQL sur Microsoft Fabric Lakehouse Gold
    - Tables: fact_statistiques_apf (arrivées frontières: mre, tes, nationalite, poste_frontiere, region, continent, voie, date_stat)
-   - Tables: fact_statistiqueshebergementnationaliteestimees (nuitées, arrivées hôtelières: eht_id, nationalite_name, categorie_name, region_name, date_stat, nuitees, arrivees)
+   - Tables: fact_statistiqueshebergementnationaliteestimees (nuitées, arrivées hôtelières estimées: eht_id, nationalite_name, categorie_name, province_name, region_name, date_stat, nuitees, arrivees)
    - Jointures: gld_dim_categories_classements, gld_dim_etablissements_hebergements, gld_dim_delegations
-   - Données mensuelles (date_stat = 1er du mois). Plage: 2019, 2023-2026 (Jan-Fev 2026)
+   - Données mensuelles: filtrer avec YEAR(date_stat)/MONTH(date_stat), vérifier les mois disponibles pour les années partielles
 
 2. **web_search** — Recherche web (Tavily/Exa/Brave)
    - Actualités tourisme Maroc, contexte international, stratégie, Vision 2030
