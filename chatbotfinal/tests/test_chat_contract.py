@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ui.state.session import Conversation, Message
 from agents.orchestrator import ConversationRuntimeState, Orchestrator
 from orchestration.nodes import build_default_registry
-from server import _CHARTS_DIR, _resp, extract_chart_paths
+from server import _CHARTS_DIR, _resp, app, extract_chart_paths
 
 
 def test_message_metadata_and_chart_urls(tmp_path):
@@ -84,6 +84,21 @@ def test_extract_chart_paths_is_bounded_to_charts_dir():
         for path in [path1, path2]:
             if os.path.exists(path):
                 os.remove(path)
+
+
+def test_serve_chart_uses_runtime_charts_dir():
+    os.makedirs(_CHARTS_DIR, exist_ok=True)
+    path = os.path.join(_CHARTS_DIR, "unit_served_chart.html")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("<html><body>ok</body></html>")
+        response = app.test_client().get("/charts/unit_served_chart.html")
+        assert response.status_code == 200
+        assert b"ok" in response.data
+        response.close()
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def test_orchestrator_deliverable_detection_without_init():

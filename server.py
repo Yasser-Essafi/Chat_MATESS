@@ -145,15 +145,21 @@ def extract_chart_path(text: str) -> Optional[str]:
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            path = match.group(1).strip()
-            # Resolve to absolute path
-            if not os.path.isabs(path):
-                path = os.path.join(PROJECT_ROOT, path)
-            # Security: must be inside the charts/ directory
-            real_path = os.path.realpath(path)
-            real_charts = os.path.realpath(_CHARTS_DIR)
-            if real_path.startswith(real_charts) and os.path.exists(real_path):
+            real_path = _resolve_chart_path(match.group(1))
+            if real_path:
                 return real_path
+    return None
+
+
+def _resolve_chart_path(path: str) -> Optional[str]:
+    if not path:
+        return None
+    raw = path.strip().strip("`),.;").replace("\\", "/")
+    candidate = raw if os.path.isabs(raw) else os.path.join(_CHARTS_DIR, os.path.basename(raw))
+    real_path = os.path.realpath(candidate)
+    real_charts = os.path.realpath(_CHARTS_DIR)
+    if real_path.startswith(real_charts + os.sep) and os.path.exists(real_path):
+        return real_path
     return None
 
 
@@ -167,15 +173,11 @@ def extract_chart_paths(text: str, limit: int = 4) -> list[str]:
         r"Chart:\s*(.+?\.html)",
         r"((?:[^\s]*/charts/|charts/)[^\s]+\.html)",
     ]
-    real_charts = os.path.realpath(_CHARTS_DIR)
     paths: list[str] = []
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
-            path = match.group(1).strip().strip("`),.;")
-            if not os.path.isabs(path):
-                path = os.path.join(PROJECT_ROOT, path)
-            real_path = os.path.realpath(path)
-            if real_path.startswith(real_charts) and os.path.exists(real_path) and real_path not in paths:
+            real_path = _resolve_chart_path(match.group(1))
+            if real_path and real_path not in paths:
                 paths.append(real_path)
                 if len(paths) >= limit:
                     return paths
@@ -300,11 +302,10 @@ def index():
 
 @app.route("/charts/<path:filename>")
 def serve_chart(filename):
-    charts_dir = os.path.join(PROJECT_ROOT, "charts")
-    try:
-        return send_from_directory(charts_dir, filename)
-    except Exception:
+    chart_path = _resolve_chart_path(filename)
+    if not chart_path:
         abort(404)
+    return send_from_directory(_CHARTS_DIR, os.path.basename(chart_path))
 
 
 @app.route("/assets/<path:filename>")
@@ -1158,7 +1159,7 @@ def _chart_from_markdown_table(text: str, message: str) -> Optional[str]:
         preferred_x = next((c for c in ["mois_fr", "mois", "annee", "année", "pays_residence", "nationalite", "region"] if c in df.columns), None)
         x_col = preferred_x or next((c for c in df.columns if c not in numeric_cols), df.columns[0])
         y_col = next((c for c in numeric_cols if c != x_col), numeric_cols[0])
-        title = "Graphique généré par STATOUR"
+        title = "Graphique généré par l'assistant d'analyse du tourisme"
         if "apf" in message.lower():
             title = "Arrivées APF"
         elif "hébergement" in message.lower() or "hebergement" in message.lower():
@@ -1275,7 +1276,7 @@ def _chart_from_ranked_text(text: str, message: str) -> Optional[str]:
             term in (message or "").lower() for term in ["part", "parts", "share", "repartition", "répartition"]
         )
         df = df.sort_values("value", ascending=True)
-        title = "Graphique genere par STATOUR"
+        title = "Graphique genere par l'assistant d'analyse du tourisme"
         if share_mode:
             title = "Classement et parts"
 
@@ -1602,14 +1603,17 @@ def _markdownish_to_html(text: str) -> str:
     return "\n".join(out)
 
 
+def _public_display_text(value: str) -> str:
+    return re.sub(r"\bSTATOUR\b", "Assistant d'analyse du tourisme", str(value or ""), flags=re.IGNORECASE)
+
+
 def _build_report_html(payload: dict) -> str:
     ministry_logo = _asset_data_uri("logo.png") or _asset_data_uri("logo2.png")
-    alexsys_logo = _asset_data_uri("alexsys-logo.png")
-    title = html.escape(payload.get("title") or "Rapport d'analyse STATOUR")
-    question = html.escape(payload.get("question") or "")
+    title = html.escape(_public_display_text(payload.get("title") or "Rapport d'analyse du tourisme"))
+    question = html.escape(_public_display_text(payload.get("question") or ""))
     confidence = html.escape(payload.get("confidence") or "non précisée")
     generated = datetime.now().strftime("%d/%m/%Y %H:%M")
-    body = _markdownish_to_html(payload.get("response") or "")
+    body = _markdownish_to_html(_public_display_text(payload.get("response") or ""))
     chart_urls = payload.get("chart_urls") or []
     chart_url = payload.get("chart_url") or (chart_urls[0] if chart_urls else "")
     chart_urls = chart_urls or ([chart_url] if chart_url else [])
@@ -1640,7 +1644,7 @@ def _build_report_html(payload: dict) -> str:
         chart_block = "<section class='card'>" + "\n".join(chart_sections) + "</section>"
     sources = payload.get("sources") or []
     source_items = "\n".join(
-        f"<li><strong>{html.escape(s.get('source') or s.get('title') or 'Source')}</strong>"
+        f"<li><strong>{html.escape(_public_display_text(s.get('source') or s.get('title') or 'Source'))}</strong>"
         + (f" · <a href='{html.escape(s.get('url'))}'>{html.escape(s.get('url'))}</a>" if s.get("url") else "")
         + "</li>"
         for s in sources[:12]
@@ -1657,7 +1661,6 @@ def _build_report_html(payload: dict) -> str:
     header {{ padding: 28px 34px 22px; border-bottom: 4px solid #0b4f71; display: flex; align-items: center; justify-content: space-between; gap: 24px; }}
     .logos {{ display: flex; align-items: center; gap: 20px; }}
     .logos img.ministry {{ height: 62px; max-width: 460px; object-fit: contain; }}
-    .logos img.alexsys {{ height: 52px; object-fit: contain; }}
     .meta {{ text-align: right; color: #64748b; font-size: 12px; line-height: 1.5; }}
     main {{ padding: 30px 34px 38px; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; letter-spacing: 0; color: #0f2f46; }}
@@ -1678,9 +1681,8 @@ def _build_report_html(payload: dict) -> str:
     <header>
       <div class="logos">
         {f'<img class="ministry" src="{ministry_logo}" alt="Ministere du Tourisme">' if ministry_logo else ''}
-        {f'<img class="alexsys" src="{alexsys_logo}" alt="Alexsys Solutions">' if alexsys_logo else ''}
       </div>
-      <div class="meta">STATOUR MVP<br>{generated}<br><span class="badge">Confiance : {confidence}</span></div>
+      <div class="meta">Assistant d'analyse du tourisme<br>{generated}<br><span class="badge">Confiance : {confidence}</span></div>
     </header>
     <main>
       <h1>{title}</h1>
@@ -1689,7 +1691,7 @@ def _build_report_html(payload: dict) -> str:
       {chart_block}
       <section class="card"><h2>Sources utilisées</h2><ul>{source_items}</ul></section>
     </main>
-    <footer>Rapport généré automatiquement par STATOUR. Les résultats analytiques doivent être validés selon les processus officiels du Ministère.</footer>
+    <footer>Rapport généré automatiquement. Les résultats analytiques doivent être validés selon les processus officiels du Ministère.</footer>
   </div>
 </body>
 </html>"""
@@ -1705,7 +1707,7 @@ def create_report():
     response = (data.get("response") or "").strip()
     if not response:
         return jsonify({"error": "response_required"}), 400
-    report_id = f"statour_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.html"
+    report_id = f"tourisme_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.html"
     path = os.path.join(REPORTS_DIR, report_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(_build_report_html(data))

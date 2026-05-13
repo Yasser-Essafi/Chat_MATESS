@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>STATOUR Analyste IA</title>
-  <meta name="description" content="Assistant d'analyse touristique STATOUR" />
+  <title>Assistant d'analyse du tourisme</title>
+  <meta name="description" content="Assistant d'analyse touristique" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -67,7 +67,6 @@
       gap: 16px;
     }
     .brand .ministry { height: 46px; max-width: min(460px, 44vw); object-fit: contain; }
-    .brand .alexsys { height: 38px; object-fit: contain; }
     .product {
       min-width: 190px;
       padding-left: 16px;
@@ -596,7 +595,6 @@
       .topbar { padding: 10px 12px; }
       .brand { width: 100%; justify-content: space-between; gap: 10px; }
       .brand .ministry { max-width: 58vw; }
-      .brand .alexsys { display: none; }
       .product { min-width: 0; border-left: 0; padding-left: 0; }
       .workspace { padding: 10px; gap: 10px; }
       .messages { padding: 14px; }
@@ -614,10 +612,9 @@
       <div class="brand">
         <img class="ministry" src="/assets/logo.png" alt="Royaume du Maroc - Ministère du Tourisme">
         <div class="product">
-          <h1>STATOUR Analyste IA</h1>
+          <h1>Assistant d'analyse du tourisme</h1>
           <p>KPI Fabric, analyses, veille et recommandations</p>
         </div>
-        <img class="alexsys" src="/assets/alexsys-logo.png" alt="Alexsys Solutions">
       </div>
       <div class="status" id="statusBar"><span class="pill">Initialisation</span></div>
     </header>
@@ -630,7 +627,7 @@
           <div class="prompt-list" id="promptList"></div>
         </div>
         <div class="conv-list" id="conversationList"></div>
-        <div class="side-foot" id="sideFoot">Connexion aux services STATOUR...</div>
+        <div class="side-foot" id="sideFoot">Connexion aux services d'analyse...</div>
       </aside>
 
       <section class="main">
@@ -676,7 +673,7 @@
       'Quels marchés émetteurs méritent attention ce mois-ci ?'
     ];
 
-    class StatourChat {
+    class TourismAnalysisChat {
       constructor() {
         this.conversationId = null;
         this.messages = [];
@@ -884,7 +881,7 @@
         return `
           <div class="empty">
             <div>
-              <h2>Bienvenue sur STATOUR</h2>
+              <h2>Bienvenue</h2>
               <p>Posez une question analytique, demandez plusieurs graphiques, ou relancez une analyse existante depuis un message.</p>
             </div>
             <div class="empty-grid">
@@ -1090,7 +1087,7 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              title: 'Rapport d’analyse STATOUR',
+              title: 'Rapport d’analyse du tourisme',
               question: userQuestion,
               response: msg.content,
               confidence: msg.confidence,
@@ -1110,10 +1107,16 @@
         }
       }
 
+      publicText(value) {
+        const hiddenBrand = 'STA' + 'TOUR';
+        return String(value ?? '').replace(new RegExp(`\\b${hiddenBrand}\\b`, 'gi'), "Assistant d'analyse du tourisme");
+      }
+
       renderMarkdown(text) {
         if (!text) return '';
-        if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(text));
-        return this.esc(text).replace(/\n/g, '<br>');
+        const clean = this.publicText(text);
+        if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(clean));
+        return this.esc(clean).replace(/\n/g, '<br>');
       }
 
       setLoading(v) {
@@ -1132,13 +1135,13 @@
       }
 
       esc(v) {
-        return String(v ?? '').replace(/[&<>"']/g, ch => ({
+        return this.publicText(v).replace(/[&<>"']/g, ch => ({
           '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
         }[ch]));
       }
     }
 
-    const app = new StatourChat();
+    const app = new TourismAnalysisChat();
     document.addEventListener('DOMContentLoaded', () => app.init());
   </script>
 </body>
